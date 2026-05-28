@@ -147,6 +147,10 @@ def create_session(operator_id):
 
     return token, expires_at.isoformat()
 
+
+def normalize_operator_id(operator_id):
+    return str(operator_id or "").strip().lower()
+
 # Global variable to store the latest flight data
 latest_flight_data = {
     "node_id": "None",
@@ -239,7 +243,7 @@ def upsert_google_operator(profile, organisation):
 @app.route('/auth/signup', methods=['POST'])
 def signup():
     payload = request.get_json(silent=True) or {}
-    operator_id = str(payload.get("operator_id", "")).strip()
+    operator_id = normalize_operator_id(payload.get("operator_id"))
     full_name = str(payload.get("full_name", "")).strip()
     organisation = str(payload.get("organisation", DEFAULT_ORGANISATION)).strip() or DEFAULT_ORGANISATION
     password = str(payload.get("password", ""))
@@ -280,7 +284,7 @@ def signup():
 @app.route('/auth/login', methods=['POST'])
 def login():
     payload = request.get_json(silent=True) or {}
-    operator_id = str(payload.get("operator_id", "")).strip()
+    operator_id = normalize_operator_id(payload.get("operator_id"))
     password = str(payload.get("password", ""))
     source = request.headers.get("X-Forwarded-For", request.remote_addr or "unknown")
 
