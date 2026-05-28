@@ -23,6 +23,18 @@ DEVICE_TOKEN = os.getenv("DEVICE_TOKEN", "development-device-token")
 #   vibration,temp,pressure[,crc32]
 #   node_id,vibration,temp,pressure
 FEATURE_NAMES = ("vibration", "temperature", "pressure")
+ESP32_BOOT_PREFIXES = (
+    "ELF file SHA256",
+    "Rebooting",
+    "rst:",
+    "configsip:",
+    "clk_drv:",
+    "mode:",
+    "load:",
+    "entry ",
+    "Waiting for data",
+    "--- GATEWAY IS ONLINE",
+)
 
 
 def load_or_train_model():
@@ -82,6 +94,10 @@ def _is_float(value):
         return False
 
 
+def is_esp32_boot_line(line):
+    return any(line.startswith(prefix) for prefix in ESP32_BOOT_PREFIXES)
+
+
 def parse_esp_line(line):
     """Convert Arduino Serial telemetry into a node id and feature floats."""
     parts = [value.strip() for value in line.split(",")]
@@ -132,6 +148,7 @@ def post_to_dashboard(payload):
     headers = {"X-Device-Token": DEVICE_TOKEN}
     response = requests.post(FLASK_UPDATE_URL, json=payload, headers=headers, timeout=2)
     response.raise_for_status()
+    return response
 
 
 def main():
@@ -151,29 +168,38 @@ def main():
         return 1
 
     print(f"Monitoring ESP relay on {serial_port} at {BAUD_RATE} baud...")
+    print(f"Posting telemetry to: {FLASK_UPDATE_URL}")
+    if FLASK_UPDATE_URL.startswith("http://127.0.0.1") or FLASK_UPDATE_URL.startswith("http://localhost"):
+        print("[!] Using local Flask URL. Set FLASK_UPDATE_URL to your Render /update URL when the backend is deployed.")
     print("Expected serial format: node_id,vibration,temp,pressure")
 
     while True:
         line = ser.readline().decode("utf-8", errors="replace").strip()
         if not line:
             continue
+        if is_esp32_boot_line(line):
+            continue
 
         try:
             payload = build_payload(*parse_esp_line(line))
-            post_to_dashboard(payload)
+            response = post_to_dashboard(payload)
         except ValueError as exc:
             print(f"Skipping malformed serial line {line!r}: {exc}")
             continue
         except requests.RequestException as exc:
-            print(f"Dashboard update failed: {exc}")
+            print(f"Dashboard update failed for {FLASK_UPDATE_URL}: {exc}")
             time.sleep(1)
             continue
 
         status = "ANOMALY" if payload["anomaly"] else "Healthy"
+        api_status = ""
+        if response.status_code != 200:
+            api_status = f" | API returned HTTP {response.status_code}: {response.text[:120]}"
         print(
             f"{payload['node_id']} | {status} | "
             f"vib={payload['vibr_x']:.3f}, temp={payload['m_temp']:.1f}, "
             f"press={payload['press']:.2f}, dist={payload['cluster_distance']:.2f}"
+            f"{api_status}"
         )
 
 
