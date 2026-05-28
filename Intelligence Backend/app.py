@@ -1,0 +1,450 @@
+import secrets
+import sqlite3
+import math
+import os
+from datetime import datetime, timedelta, timezone
+from functools import wraps
+from pathlib import Path
+
+import requests
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+from werkzeug.security import check_password_hash, generate_password_hash
+
+from security_layer import (
+    record_failed_login,
+    security_summary,
+    validate_device_token,
+    validate_integrity,
+)
+
+app = Flask(__name__)
+CORS(app) # Allows React to talk to Flask
+
+BASE_DIR = Path(__file__).resolve().parent
+DATABASE_PATH = BASE_DIR / "flight_ops.db"
+SESSION_HOURS = 12
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
+DEFAULT_ORGANISATION = os.getenv("DEFAULT_ORGANISATION", "Aero-Mesh Operations")
+TELEMETRY_LIMITS = {
+    "vibr_x": (0.0, 20.0),
+    "m_temp": (-40.0, 125.0),
+    "press": (300.0, 1100.0),
+    "cluster_distance": (0.0, 1000.0),
+}
+MAX_SINGLE_PACKET_JUMP = {
+    "vibr_x": 3.0,
+    "m_temp": 25.0,
+    "press": 120.0,
+    "cluster_distance": 80.0,
+}
+ANOMALY_CONFIRMATION_PACKETS = 2
+
+
+def get_db():
+    connection = sqlite3.connect(DATABASE_PATH)
+    connection.row_factory = sqlite3.Row
+    return connection
+
+
+def init_db():
+    with get_db() as db:
+        db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS operators (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                operator_id TEXT NOT NULL UNIQUE,
+                full_name TEXT NOT NULL,
+                organisation TEXT NOT NULL DEFAULT 'Aero-Mesh Operations',
+                password_hash TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        columns = db.execute("PRAGMA table_info(operators)").fetchall()
+        column_names = {column["name"] for column in columns}
+        if "organisation" not in column_names:
+            db.execute(
+                """
+                ALTER TABLE operators
+                ADD COLUMN organisation TEXT NOT NULL DEFAULT 'Aero-Mesh Operations'
+                """
+            )
+        db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS sessions (
+                token TEXT PRIMARY KEY,
+                operator_id TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (operator_id) REFERENCES operators (operator_id)
+            )
+            """
+        )
+        db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS security_incidents (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_type TEXT NOT NULL,
+                severity TEXT NOT NULL,
+                source TEXT NOT NULL,
+                details TEXT NOT NULL,
+                buzzer_triggered INTEGER NOT NULL DEFAULT 0,
+                led_triggered INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+
+
+def operator_from_token(token):
+    if not token:
+        return None
+
+    now = datetime.now(timezone.utc).isoformat()
+    with get_db() as db:
+        session = db.execute(
+            """
+            SELECT operators.operator_id, operators.full_name, operators.organisation
+            FROM sessions
+            JOIN operators ON operators.operator_id = sessions.operator_id
+            WHERE sessions.token = ? AND sessions.expires_at > ?
+            """,
+            (token, now),
+        ).fetchone()
+
+    return dict(session) if session else None
+
+
+def require_auth(route_handler):
+    @wraps(route_handler)
+    def wrapped(*args, **kwargs):
+        auth_header = request.headers.get("Authorization", "")
+        token = auth_header.replace("Bearer ", "", 1).strip()
+        operator = operator_from_token(token)
+        if not operator:
+            return jsonify({"status": "error", "message": "Authentication required"}), 401
+
+        request.operator = operator
+        return route_handler(*args, **kwargs)
+
+    return wrapped
+
+
+def create_session(operator_id):
+    token = secrets.token_urlsafe(32)
+    now = datetime.now(timezone.utc)
+    expires_at = now + timedelta(hours=SESSION_HOURS)
+
+    with get_db() as db:
+        db.execute(
+            """
+            INSERT INTO sessions (token, operator_id, expires_at, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (token, operator_id, expires_at.isoformat(), now.isoformat()),
+        )
+
+    return token, expires_at.isoformat()
+
+# Global variable to store the latest flight data
+latest_flight_data = {
+    "node_id": "None",
+    "vibr_x": 0.0,
+    "m_temp": 0.0,
+    "press": 0,
+    "cluster": 0,
+    "cluster_distance": 0.0,
+    "anomaly": False,
+    "telemetry_quality": "waiting"
+}
+telemetry_window = []
+anomaly_streak = 0
+
+
+def utc_iso():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def parse_float_field(payload, field):
+    value = float(payload[field])
+    if not math.isfinite(value):
+        raise ValueError(f"{field} is not finite")
+    return value
+
+
+def validate_and_filter_telemetry(payload):
+    global anomaly_streak
+
+    candidate = {
+        "node_id": str(payload["node_id"]),
+        "vibr_x": parse_float_field(payload, "vibr_x"),
+        "m_temp": parse_float_field(payload, "m_temp"),
+        "press": parse_float_field(payload, "press"),
+        "cluster": int(payload.get("cluster", 0)),
+        "cluster_distance": parse_float_field(payload, "cluster_distance") if "cluster_distance" in payload else 0.0,
+        "raw_anomaly": bool(payload["anomaly"]),
+    }
+
+    for field, (minimum, maximum) in TELEMETRY_LIMITS.items():
+        if not minimum <= candidate[field] <= maximum:
+            return None, f"{field} value {candidate[field]:.3f} is outside the valid sensor range"
+
+    if latest_flight_data.get("integrity") == "verified":
+        for field, maximum_jump in MAX_SINGLE_PACKET_JUMP.items():
+            if abs(candidate[field] - float(latest_flight_data.get(field, 0.0))) > maximum_jump:
+                return None, f"{field} jumped too far in a single packet and was treated as transmission noise"
+
+    recent = telemetry_window[-4:] + [candidate]
+    filtered = dict(candidate)
+    for field in ("vibr_x", "m_temp", "press", "cluster_distance"):
+        filtered[field] = sum(item[field] for item in recent) / len(recent)
+
+    anomaly_streak = anomaly_streak + 1 if candidate["raw_anomaly"] else 0
+    filtered["anomaly"] = anomaly_streak >= ANOMALY_CONFIRMATION_PACKETS
+    filtered["telemetry_quality"] = "filtered" if len(recent) > 1 else "verified"
+    filtered["integrity"] = "verified"
+    filtered["received_at"] = utc_iso()
+    return filtered, "Telemetry accepted after validation and noise filtering"
+
+
+def upsert_google_operator(profile, organisation):
+    email = profile["email"].strip().lower()
+    full_name = profile.get("name") or email.split("@")[0]
+    now = utc_iso()
+
+    with get_db() as db:
+        operator = db.execute(
+            "SELECT operator_id, full_name, organisation FROM operators WHERE operator_id = ?",
+            (email,),
+        ).fetchone()
+
+        if not operator:
+            db.execute(
+                """
+                INSERT INTO operators (operator_id, full_name, organisation, password_hash, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (email, full_name, organisation, generate_password_hash(secrets.token_urlsafe(32)), now),
+            )
+            operator = {
+                "operator_id": email,
+                "full_name": full_name,
+                "organisation": organisation,
+            }
+
+    return dict(operator)
+
+
+@app.route('/auth/signup', methods=['POST'])
+def signup():
+    payload = request.get_json(silent=True) or {}
+    operator_id = str(payload.get("operator_id", "")).strip()
+    full_name = str(payload.get("full_name", "")).strip()
+    organisation = str(payload.get("organisation", DEFAULT_ORGANISATION)).strip() or DEFAULT_ORGANISATION
+    password = str(payload.get("password", ""))
+
+    if not operator_id or not full_name or not password:
+        return jsonify({"status": "error", "message": "Operator ID, full name, and password are required"}), 400
+
+    if len(password) < 6:
+        return jsonify({"status": "error", "message": "Password must be at least 6 characters"}), 400
+
+    try:
+        with get_db() as db:
+            db.execute(
+                """
+                INSERT INTO operators (operator_id, full_name, organisation, password_hash, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    operator_id,
+                    full_name,
+                    organisation,
+                    generate_password_hash(password),
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+    except sqlite3.IntegrityError:
+        return jsonify({"status": "error", "message": "Operator ID already exists"}), 409
+
+    token, expires_at = create_session(operator_id)
+    return jsonify({
+        "status": "success",
+        "token": token,
+        "expires_at": expires_at,
+        "operator": {"operator_id": operator_id, "full_name": full_name, "organisation": organisation},
+    }), 201
+
+
+@app.route('/auth/login', methods=['POST'])
+def login():
+    payload = request.get_json(silent=True) or {}
+    operator_id = str(payload.get("operator_id", "")).strip()
+    password = str(payload.get("password", ""))
+    source = request.headers.get("X-Forwarded-For", request.remote_addr or "unknown")
+
+    with get_db() as db:
+        operator = db.execute(
+            "SELECT operator_id, full_name, organisation, password_hash FROM operators WHERE operator_id = ?",
+            (operator_id,),
+        ).fetchone()
+
+    if not operator or not check_password_hash(operator["password_hash"], password):
+        with get_db() as db:
+            record_failed_login(db, operator_id, source)
+        return jsonify({"status": "error", "message": "Invalid operator ID or password"}), 401
+
+    token, expires_at = create_session(operator_id)
+    return jsonify({
+        "status": "success",
+        "token": token,
+        "expires_at": expires_at,
+        "operator": {
+            "operator_id": operator["operator_id"],
+            "full_name": operator["full_name"],
+            "organisation": operator["organisation"],
+        },
+    })
+
+
+@app.route('/auth/google', methods=['POST'])
+def google_auth():
+    if not GOOGLE_CLIENT_ID:
+        return jsonify({
+            "status": "error",
+            "message": "Google sign-up is not configured. Set GOOGLE_CLIENT_ID on the backend.",
+        }), 503
+
+    payload = request.get_json(silent=True) or {}
+    credential = str(payload.get("credential", "")).strip()
+    organisation = str(payload.get("organisation", DEFAULT_ORGANISATION)).strip() or DEFAULT_ORGANISATION
+    if not credential:
+        return jsonify({"status": "error", "message": "Google credential is required"}), 400
+
+    try:
+        response = requests.get(
+            "https://oauth2.googleapis.com/tokeninfo",
+            params={"id_token": credential},
+            timeout=8,
+        )
+        response.raise_for_status()
+        profile = response.json()
+    except requests.RequestException:
+        return jsonify({"status": "error", "message": "Unable to verify Google sign-up"}), 401
+
+    if profile.get("aud") != GOOGLE_CLIENT_ID or profile.get("email_verified") not in {"true", True}:
+        return jsonify({"status": "error", "message": "Google account could not be verified"}), 401
+
+    operator = upsert_google_operator(profile, organisation)
+    token, expires_at = create_session(operator["operator_id"])
+    return jsonify({
+        "status": "success",
+        "token": token,
+        "expires_at": expires_at,
+        "operator": operator,
+    })
+
+
+@app.route('/auth/me', methods=['GET'])
+@require_auth
+def current_operator():
+    return jsonify({"status": "success", "operator": request.operator})
+
+
+@app.route('/operators', methods=['GET'])
+@require_auth
+def get_operators():
+    with get_db() as db:
+        operators = db.execute(
+            """
+            SELECT operator_id, full_name, organisation, created_at
+            FROM operators
+            WHERE organisation = ?
+            ORDER BY full_name COLLATE NOCASE ASC
+            """,
+            (request.operator["organisation"],),
+        ).fetchall()
+
+    return jsonify({
+        "status": "success",
+        "organisation": request.operator["organisation"],
+        "operators": [dict(operator) for operator in operators],
+    })
+
+@app.route('/update', methods=['POST'])
+def update():
+    global latest_flight_data
+    payload = request.get_json(silent=True)
+    if not payload:
+        return jsonify({"status": "error", "message": "JSON payload required"}), 400
+    source = request.headers.get("X-Forwarded-For", request.remote_addr or "unknown")
+
+    required_fields = ("node_id", "vibr_x", "m_temp", "press", "anomaly")
+    missing_fields = [field for field in required_fields if field not in payload]
+    if missing_fields:
+        return jsonify({
+            "status": "error",
+            "message": f"Missing field(s): {', '.join(missing_fields)}"
+        }), 400
+
+    with get_db() as db:
+        if not validate_device_token(db, request.headers, source):
+            return jsonify({
+                "status": "error",
+                "message": "Unauthorized telemetry device",
+                "security": security_summary(db),
+            }), 403
+
+        integrity_ok, integrity_message = validate_integrity(db, payload, source)
+        if not integrity_ok:
+            return jsonify({
+                "status": "error",
+                "message": integrity_message,
+                "security": security_summary(db),
+            }), 400
+
+    try:
+        filtered_data, quality_message = validate_and_filter_telemetry(payload)
+    except (TypeError, ValueError) as exc:
+        return jsonify({
+            "status": "ignored",
+            "message": f"Telemetry packet ignored as sensor noise: {exc}",
+            "telemetry_quality": "ignored",
+        }), 202
+
+    if filtered_data is None:
+        return jsonify({
+            "status": "ignored",
+            "message": quality_message,
+            "telemetry_quality": "ignored",
+        }), 202
+
+    telemetry_window.append(filtered_data)
+    if len(telemetry_window) > 5:
+        telemetry_window.pop(0)
+
+    latest_flight_data = filtered_data
+    print(f"Data Received: {latest_flight_data}")
+    return jsonify({"status": "success", "message": quality_message}), 200
+
+@app.route('/data', methods=['GET'])
+@require_auth
+def get_data():
+    with get_db() as db:
+        payload = dict(latest_flight_data)
+        payload["security"] = security_summary(db)
+    return jsonify(payload)
+
+
+@app.route('/security/incidents', methods=['GET'])
+@require_auth
+def get_security_incidents():
+    with get_db() as db:
+        return jsonify({"status": "success", "security": security_summary(db, limit=20)})
+
+
+init_db()
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000, debug=True)
