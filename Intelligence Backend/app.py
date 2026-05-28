@@ -444,6 +444,11 @@ def get_security_incidents():
         return jsonify({"status": "success", "security": security_summary(db, limit=20)})
 
 
+@app.route('/health', methods=['GET'])
+def health():
+    return jsonify({"status": "ok", "service": "aerogauge-api"})
+
+
 init_db()
 
 if __name__ == '__main__':
