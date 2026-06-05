@@ -35,7 +35,6 @@ const defaultData = {
   integrity: 'pending',
   security: {
     ids_status: 'CLEAR',
-    buzzer: false,
     warning_led: false,
     recent_incidents: [],
   },
@@ -401,11 +400,7 @@ function SecurityPanel({ security }) {
         </span>
       </div>
 
-      <div className="mt-5 grid gap-3 sm:grid-cols-2">
-        <div className={`rounded-md border p-3 ${security?.buzzer ? 'border-red-200 bg-red-50 text-red-700' : 'border-slate-100 bg-slate-50 text-slate-600'}`}>
-          <p className="text-xs font-semibold uppercase">Buzzer</p>
-          <p className="mt-1 text-sm font-semibold">{security?.buzzer ? 'Triggered' : 'Standby'}</p>
-        </div>
+      <div className="mt-5">
         <div className={`rounded-md border p-3 ${security?.warning_led ? 'border-amber-200 bg-amber-50 text-amber-700' : 'border-slate-100 bg-slate-50 text-slate-600'}`}>
           <p className="text-xs font-semibold uppercase">Warning LED</p>
           <p className="mt-1 text-sm font-semibold">{security?.warning_led ? 'Flashing' : 'Standby'}</p>
