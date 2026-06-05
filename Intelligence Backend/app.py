@@ -31,6 +31,7 @@ TELEMETRY_LIMITS = {
     "m_temp": (-40.0, 125.0),
     "press": (300.0, 1100.0),
     "cluster_distance": (0.0, 1000.0),
+    "ai_confidence": (0.0, 100.0),
 }
 MAX_SINGLE_PACKET_JUMP = {
     "vibr_x": 3.0,
@@ -151,7 +152,7 @@ def create_session(operator_id):
 def normalize_operator_id(operator_id):
     return str(operator_id or "").strip().lower()
 
-# Global variable to store the latest flight data
+
 latest_flight_data = {
     "node_id": "None",
     "vibr_x": 0.0,
@@ -159,8 +160,10 @@ latest_flight_data = {
     "press": 0,
     "cluster": 0,
     "cluster_distance": 0.0,
+    "ai_confidence": 0.0,
+    "composite_trend_value": 0.0,
     "anomaly": False,
-    "telemetry_quality": "waiting"
+    "telemetry_quality": "waiting",
 }
 telemetry_window = []
 anomaly_streak = 0
@@ -177,6 +180,21 @@ def parse_float_field(payload, field):
     return value
 
 
+def parse_bool_field(payload, field):
+    value = payload[field]
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "y", "anomaly"}:
+            return True
+        if normalized in {"false", "0", "no", "n", "normal"}:
+            return False
+    raise ValueError(f"{field} must be a boolean value")
+
+
 def validate_and_filter_telemetry(payload):
     global anomaly_streak
 
@@ -187,7 +205,8 @@ def validate_and_filter_telemetry(payload):
         "press": parse_float_field(payload, "press"),
         "cluster": int(payload.get("cluster", 0)),
         "cluster_distance": parse_float_field(payload, "cluster_distance") if "cluster_distance" in payload else 0.0,
-        "raw_anomaly": bool(payload["anomaly"]),
+        "ai_confidence": parse_float_field(payload, "ai_confidence") if "ai_confidence" in payload else 0.0,
+        "raw_anomaly": parse_bool_field(payload, "anomaly"),
     }
 
     for field, (minimum, maximum) in TELEMETRY_LIMITS.items():
@@ -201,7 +220,7 @@ def validate_and_filter_telemetry(payload):
 
     recent = telemetry_window[-4:] + [candidate]
     filtered = dict(candidate)
-    for field in ("vibr_x", "m_temp", "press", "cluster_distance"):
+    for field in ("vibr_x", "m_temp", "press", "cluster_distance", "ai_confidence"):
         filtered[field] = sum(item[field] for item in recent) / len(recent)
 
     anomaly_streak = anomaly_streak + 1 if candidate["raw_anomaly"] else 0
@@ -209,6 +228,13 @@ def validate_and_filter_telemetry(payload):
     filtered["telemetry_quality"] = "filtered" if len(recent) > 1 else "verified"
     filtered["integrity"] = "verified"
     filtered["received_at"] = utc_iso()
+
+    norm_vibration = filtered["vibr_x"] * 2.0
+    norm_temperature = max(0.0, (filtered["m_temp"] - 25.0) * 0.1)
+    norm_distance = filtered["cluster_distance"] * 0.5
+    norm_confidence = max(0.0, (100.0 - filtered["ai_confidence"]) * 0.03)
+    filtered["composite_trend_value"] = round(norm_vibration + norm_temperature + norm_distance + norm_confidence, 2)
+
     return filtered, "Telemetry accepted after validation and noise filtering"
 
 
@@ -376,6 +402,7 @@ def get_operators():
         "operators": [dict(operator) for operator in operators],
     })
 
+
 @app.route('/update', methods=['POST'])
 def update():
     global latest_flight_data
@@ -430,7 +457,16 @@ def update():
 
     latest_flight_data = filtered_data
     print(f"Data Received: {latest_flight_data}")
-    return jsonify({"status": "success", "message": quality_message}), 200
+    return jsonify({
+        "status": "success",
+        "message": quality_message,
+        "anomaly": filtered_data["anomaly"],
+        "alarm": filtered_data["anomaly"],
+        "telemetry_quality": filtered_data["telemetry_quality"],
+        "ai_confidence": filtered_data["ai_confidence"],
+        "composite_trend_value": filtered_data["composite_trend_value"],
+    }), 200
+
 
 @app.route('/data', methods=['GET'])
 @require_auth

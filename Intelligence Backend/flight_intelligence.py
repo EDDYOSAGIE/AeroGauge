@@ -1,6 +1,7 @@
 import os
 import sys
 import time
+import json
 from pathlib import Path
 
 import numpy as np
@@ -19,9 +20,6 @@ NODE_ID = os.getenv("NODE_ID", "ESP_RELAY_01")
 MODEL_PATH = Path(os.getenv("KMEANS_MODEL_PATH", DEFAULT_MODEL_PATH))
 DEVICE_TOKEN = os.getenv("DEVICE_TOKEN", "development-device-token")
 
-# The ESP relay prints either:
-#   vibration,temp,pressure[,crc32]
-#   node_id,vibration,temp,pressure
 FEATURE_NAMES = ("vibration", "temperature", "pressure")
 ESP32_BOOT_PREFIXES = (
     "ELF file SHA256",
@@ -34,6 +32,7 @@ ESP32_BOOT_PREFIXES = (
     "entry ",
     "Waiting for data",
     "--- GATEWAY IS ONLINE",
+    "SECURE_BOOT_VERIFIED",
 )
 
 
@@ -99,27 +98,27 @@ def is_esp32_boot_line(line):
 
 
 def parse_esp_line(line):
-    """Convert Arduino Serial telemetry into a node id and feature floats."""
+    """Convert ESP32 gateway serial telemetry into a node id and feature floats."""
     parts = [value.strip() for value in line.split(",")]
-    if len(parts) not in (len(FEATURE_NAMES), len(FEATURE_NAMES) + 1):
-        raise ValueError(f"expected 3 or 4 comma-separated values, got {len(parts)}")
 
-    if len(parts) == len(FEATURE_NAMES) + 1 and _is_float(parts[-1]):
+    if len(parts) == 4 and _is_float(parts[1]) and _is_float(parts[2]) and _is_float(parts[3]):
         node_id = parts[0]
-        vibration, temperature, pressure = [float(value) for value in parts[1:]]
-        return node_id, vibration, temperature, pressure
+        return node_id, float(parts[1]), float(parts[2]), float(parts[3])
 
-    if len(parts) == len(FEATURE_NAMES) + 1:
-        sensor_payload = ",".join(parts[: len(FEATURE_NAMES)])
+    if len(parts) == 3 and all(_is_float(value) for value in parts):
+        return NODE_ID, float(parts[0]), float(parts[1]), float(parts[2])
+
+    if len(parts) == 4 and all(_is_float(value) for value in parts[:3]):
+        sensor_payload = ",".join(parts[:3])
         expected_crc = compute_crc32(sensor_payload)
-        received_crc = parts[-1].lower().replace("0x", "")
+        received_crc = parts[3].lower().replace("0x", "")
         if received_crc != expected_crc:
             raise ValueError(
                 f"serial CRC mismatch: expected {expected_crc}, received {received_crc}"
             )
+        return NODE_ID, float(parts[0]), float(parts[1]), float(parts[2])
 
-    vibration, temperature, pressure = [float(value) for value in parts[: len(FEATURE_NAMES)]]
-    return NODE_ID, vibration, temperature, pressure
+    raise ValueError("Expected node_id,vibration,temp,pressure or vibration,temp,pressure[,crc32]")
 
 
 def anomaly_distance(vibration, temperature, pressure):
@@ -129,6 +128,7 @@ def anomaly_distance(vibration, temperature, pressure):
 
 def build_payload(node_id, vibration, temperature, pressure):
     prediction = kmeans_model.predict([[vibration, temperature, pressure]])
+    confidence = max(0.0, min(100.0, 100.0 * (1.0 - (prediction["cluster_distance"] / (kmeans_model.threshold * 2.0)))))
     payload = {
         "node_id": node_id,
         "vibr_x": vibration,
@@ -136,7 +136,8 @@ def build_payload(node_id, vibration, temperature, pressure):
         "press": pressure,
         "cluster": prediction["cluster"],
         "cluster_distance": prediction["cluster_distance"],
-        "anomaly": prediction["anomaly"],
+        "ai_confidence": round(confidence, 2),
+        "anomaly": bool(prediction["anomaly"]), # Ensure strict boolean formatting for JSON serialization
     }
     canonical = canonical_telemetry_string(payload)
     payload["checksum"] = compute_crc32(canonical)
@@ -151,6 +152,18 @@ def post_to_dashboard(payload):
     return response
 
 
+def dashboard_alarm_state(response, fallback):
+    try:
+        response_payload = response.json()
+    except ValueError:
+        return fallback
+
+    if response.status_code != 200 or response_payload.get("status") != "success":
+        return fallback
+
+    return bool(response_payload.get("alarm", response_payload.get("anomaly", fallback)))
+
+
 def main():
     serial_port = SERIAL_PORT or find_esp32_gateway()
     if not serial_port:
@@ -162,7 +175,7 @@ def main():
 
     try:
         ser = serial.Serial(serial_port, BAUD_RATE, timeout=1)
-        time.sleep(2)
+        time.sleep(2) # Allow connection to settle
     except serial.SerialException as exc:
         print(f"Could not open serial port {serial_port}: {exc}", file=sys.stderr)
         return 1
@@ -173,16 +186,50 @@ def main():
         print("[!] Using local Flask URL. Set FLASK_UPDATE_URL to your Render /update URL when the backend is deployed.")
     print("Expected serial format: node_id,vibration,temp,pressure")
 
-    while True:
-        line = ser.readline().decode("utf-8", errors="replace").strip()
-        if not line:
-            continue
-        if is_esp32_boot_line(line):
-            continue
+    # Keep track of local state to avoid spamming the serial port continuously
+    alarm_active = False
 
+    while True:
         try:
+            line = ser.readline().decode("utf-8", errors="replace").strip()
+            if not line:
+                continue
+            if is_esp32_boot_line(line):
+                continue
+
+            # Process raw reading and construct secure dashboard payload
             payload = build_payload(*parse_esp_line(line))
             response = post_to_dashboard(payload)
+            
+            current_anomaly_state = dashboard_alarm_state(response, alarm_active)
+
+            if current_anomaly_state and not alarm_active:
+                print(f"[!!!] CONFIRMED ANOMALY ALERT FOR NODE {payload['node_id']}! Writing to serial...")
+                command = {"alarm": True}
+                ser.write((json.dumps(command) + "\n").encode("utf-8"))
+                ser.flush() # Forces serial pipe clear execution immediately
+                alarm_active = True
+
+            elif not current_anomaly_state and alarm_active:
+                print(f"[+] Node {payload['node_id']} returned to normal. Turning off hardware alarm.")
+                command = {"alarm": False}
+                ser.write((json.dumps(command) + "\n").encode("utf-8"))
+                ser.flush()
+                alarm_active = False
+
+            # Console Reporting Block
+            status = "ANOMALY" if current_anomaly_state else "Healthy"
+            api_status = ""
+            if response.status_code != 200:
+                api_status = f" | API returned HTTP {response.status_code}: {response.text[:120]}"
+            
+            print(
+                f"{payload['node_id']} | {status} | "
+                f"vib={payload['vibr_x']:.3f}, temp={payload['m_temp']:.1f}, "
+                f"press={payload['press']:.2f}, dist={payload['cluster_distance']:.2f}"
+                f"{api_status}"
+            )
+
         except ValueError as exc:
             print(f"Skipping malformed serial line {line!r}: {exc}")
             continue
@@ -190,18 +237,14 @@ def main():
             print(f"Dashboard update failed for {FLASK_UPDATE_URL}: {exc}")
             time.sleep(1)
             continue
-
-        status = "ANOMALY" if payload["anomaly"] else "Healthy"
-        api_status = ""
-        if response.status_code != 200:
-            api_status = f" | API returned HTTP {response.status_code}: {response.text[:120]}"
-        print(
-            f"{payload['node_id']} | {status} | "
-            f"vib={payload['vibr_x']:.3f}, temp={payload['m_temp']:.1f}, "
-            f"press={payload['press']:.2f}, dist={payload['cluster_distance']:.2f}"
-            f"{api_status}"
-        )
+        except serial.SerialException as exc:
+            print(f"Serial communications error: {exc}")
+            time.sleep(1)
+            continue
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        print("\n[*] Shutting down telemetry processor script safely.")

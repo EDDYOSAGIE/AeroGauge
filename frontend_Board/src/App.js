@@ -19,8 +19,9 @@ import {
 import axios from 'axios';
 
 
-const API_BASE_URL = process.env.REACT_APP_API_BASE_URL || 'http://127.0.0.1:5000';
+const API_BASE_URL = 'http://127.0.0.1:5000';
 const GOOGLE_CLIENT_ID = process.env.REACT_APP_GOOGLE_CLIENT_ID;
+console.log(process.env.REACT_APP_GOOGLE_CLIENT_ID);
 
 const defaultData = {
   node_id: 'N/A',
@@ -29,6 +30,8 @@ const defaultData = {
   press: 0,
   cluster: 0,
   cluster_distance: 0,
+  ai_confidence: 0,
+  composite_trend_value: 0,
   anomaly: false,
   integrity: 'pending',
   security: {
@@ -322,7 +325,8 @@ function StatCard({ label, value, unit, icon: Icon, color, change }) {
 
 function TelemetryChart({ data }) {
   const points = historySeed.map((base, index) => {
-    const live = data.vibr_x * 32 + data.m_temp * 0.45 + data.cluster_distance * 4;
+    const confidencePressure = Math.max(0, 100 - (data.ai_confidence ?? 0)) * 0.03;
+    const live = data.composite_trend_value ?? (data.vibr_x * 2 + Math.max(0, data.m_temp - 25) * 0.1 + data.cluster_distance * 0.5 + confidencePressure);
     return Math.max(12, Math.min(92, base * 0.65 + live * 0.35 + (index % 3) * 3));
   });
 
@@ -363,6 +367,7 @@ function MiniWave({ data }) {
         <div>
           <p className="text-sm text-slate-400">AI deviation score</p>
           <p className="mt-1 font-mono text-4xl font-semibold text-white">{data.cluster_distance.toFixed(2)}</p>
+          <p className="mt-2 text-sm text-slate-400">Confidence {Number(data.ai_confidence ?? 0).toFixed(0)}%</p>
         </div>
         <span className={`rounded-md px-3 py-2 text-xs font-semibold ${data.anomaly ? 'bg-red-50 text-red-700' : 'bg-emerald-50 text-emerald-700'}`}>
           {data.anomaly ? 'OUTLIER' : 'IN RANGE'}
@@ -492,6 +497,8 @@ function FlightDataView({ data }) {
     ['Pressure', `${data.press.toFixed(0)} hPa`],
     ['AI profile group', data.cluster ?? 0],
     ['AI deviation score', data.cluster_distance.toFixed(2)],
+    ['AI confidence', `${Number(data.ai_confidence ?? 0).toFixed(0)}%`],
+    ['Composite trend', (data.composite_trend_value ?? 0).toFixed(2)],
     ['Telemetry integrity', data.integrity || 'pending'],
   ];
 
