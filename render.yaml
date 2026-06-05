@@ -12,3 +12,7 @@ services:
         generateValue: true
       - key: DEFAULT_ORGANISATION
         value: Aero-Mesh Operations
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false

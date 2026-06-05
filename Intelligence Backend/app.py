@@ -17,6 +17,7 @@ from security_layer import (
     validate_device_token,
     validate_integrity,
 )
+from supabase_storage import insert_telemetry, is_enabled as supabase_enabled, latest_telemetry
 
 app = Flask(__name__)
 CORS(app) # Allows React to talk to Flask
@@ -456,6 +457,12 @@ def update():
         telemetry_window.pop(0)
 
     latest_flight_data = filtered_data
+    supabase_saved = False
+    try:
+        supabase_saved = insert_telemetry(filtered_data)
+    except requests.RequestException as exc:
+        print(f"Supabase telemetry save failed: {exc}")
+
     print(f"Data Received: {latest_flight_data}")
     return jsonify({
         "status": "success",
@@ -465,6 +472,7 @@ def update():
         "telemetry_quality": filtered_data["telemetry_quality"],
         "ai_confidence": filtered_data["ai_confidence"],
         "composite_trend_value": filtered_data["composite_trend_value"],
+        "supabase_saved": supabase_saved,
     }), 200
 
 
@@ -472,8 +480,17 @@ def update():
 @require_auth
 def get_data():
     with get_db() as db:
-        payload = dict(latest_flight_data)
+        payload = None
+        try:
+            payload = latest_telemetry()
+        except requests.RequestException as exc:
+            print(f"Supabase telemetry fetch failed: {exc}")
+
+        if not payload:
+            payload = dict(latest_flight_data)
+
         payload["security"] = security_summary(db)
+        payload["supabase_enabled"] = supabase_enabled()
     return jsonify(payload)
 
 
