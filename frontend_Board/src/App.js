@@ -22,6 +22,7 @@ import axios from 'axios';
 const API_BASE_URL = process.env.REACT_APP_API_BASE_URL || 'http://127.0.0.1:5000';
 const GOOGLE_CLIENT_ID = process.env.REACT_APP_GOOGLE_CLIENT_ID;
 const ACTIVE_ALERT_WINDOW_MS = 5 * 60 * 1000;
+const ALERT_STATUSES = new Set(['Outlier', 'High', 'Caution', 'Review']);
 
 const defaultData = {
   node_id: 'N/A',
@@ -442,7 +443,7 @@ function SecurityPanel({ security }) {
 }
 
 function getAlertRows(data) {
-  const hasTelemetry = data.telemetry_quality !== 'waiting' && data.node_id !== 'None' && data.node_id !== 'N/A';
+  const hasTelemetry = hasLiveTelemetry(data);
 
   return [
     ['Relay packet', data.node_id, data.anomaly ? 'Review' : 'Clean'],
@@ -454,6 +455,10 @@ function getAlertRows(data) {
   ];
 }
 
+function hasLiveTelemetry(data) {
+  return data.telemetry_quality !== 'waiting' && data.node_id !== 'None' && data.node_id !== 'N/A';
+}
+
 function isRecentIncident(incident) {
   if (!incident?.created_at) {
     return false;
@@ -463,19 +468,56 @@ function isRecentIncident(incident) {
   return Number.isFinite(createdAt) && Date.now() - createdAt <= ACTIVE_ALERT_WINDOW_MS;
 }
 
+function getActiveAlertRows(data) {
+  if (!hasLiveTelemetry(data)) {
+    return [];
+  }
+
+  return getAlertRows(data).filter(([, , rowStatus]) => ALERT_STATUSES.has(rowStatus));
+}
+
 function getAlertCount(data) {
-  const hasTelemetry = data.telemetry_quality !== 'waiting' && data.node_id !== 'None' && data.node_id !== 'N/A';
-  const signalAlerts = hasTelemetry
-    ? getAlertRows(data).filter(([, , rowStatus]) => (
-      rowStatus === 'Outlier' || rowStatus === 'High' || rowStatus === 'Caution' || rowStatus === 'Review'
-    )).length
-    : 0;
+  const signalAlerts = getActiveAlertRows(data).length;
   const incidentAlerts = data.security?.recent_incidents?.filter((incident) => (
     isRecentIncident(incident) && (
       incident.severity === 'medium' || incident.severity === 'high' || incident.severity === 'critical'
     )
   )).length || 0;
   return signalAlerts + incidentAlerts;
+}
+
+function getWrittenAlerts(data) {
+  const telemetryMessages = getActiveAlertRows(data).map(([signal, value, rowStatus]) => {
+    const descriptions = {
+      'Relay packet': `The latest relay packet from ${value} needs operator review because the AI marked the telemetry pattern as abnormal.`,
+      Vibration: `Vibration is high at ${value} G. Inspect the airframe reading before continuing normal monitoring.`,
+      'Motor temp': `Motor temperature is in caution range at ${value}. Check cooling and operating load.`,
+      Pressure: `Pressure reading is being tracked at ${value}.`,
+      'AI deviation score': `AI deviation score is ${value}, outside the learned healthy operating profile.`,
+      Integrity: `Telemetry integrity is ${value}. Review packet verification before trusting this feed.`,
+    };
+
+    return {
+      key: `telemetry-${signal}`,
+      title: `${signal}: ${rowStatus}`,
+      message: descriptions[signal] || `${signal} reported ${rowStatus.toLowerCase()} with value ${value}.`,
+      tone: rowStatus === 'Caution' ? 'amber' : 'red',
+    };
+  });
+
+  const securityMessages = (data.security?.recent_incidents || [])
+    .filter((incident) => (
+      isRecentIncident(incident)
+      && ['medium', 'high', 'critical'].includes(incident.severity)
+    ))
+    .map((incident, index) => ({
+      key: `security-${incident.created_at}-${index}`,
+      title: `${incident.event_type}: ${incident.severity}`,
+      message: `${incident.details || 'A security incident was recorded.'} Source: ${incident.source || 'unknown'}.`,
+      tone: incident.severity === 'medium' ? 'amber' : 'red',
+    }));
+
+  return [...telemetryMessages, ...securityMessages];
 }
 
 function buildAnalysis(data) {
@@ -577,6 +619,7 @@ function AnalysisView({ data }) {
 
 function AlertsView({ data }) {
   const alertRows = getAlertRows(data);
+  const writtenAlerts = getWrittenAlerts(data);
 
   return (
     <section className="grid gap-4 xl:grid-cols-[0.9fr_1.1fr]">
@@ -588,6 +631,22 @@ function AlertsView({ data }) {
             <p className="mt-1 text-sm text-slate-500">Telemetry and security alerts are collected here for operator review.</p>
           </div>
           <span className="rounded-md bg-slate-100 px-3 py-2 font-mono text-xs text-slate-500">REAL TIME</span>
+        </div>
+        <div className="mt-4 space-y-3">
+          {writtenAlerts.length === 0 ? (
+            <div className="rounded-md border border-emerald-100 bg-emerald-50 p-4">
+              <p className="text-sm font-semibold text-emerald-800">No active alerts</p>
+              <p className="mt-1 text-sm text-emerald-700">No live telemetry or recent security activity currently needs operator review.</p>
+            </div>
+          ) : writtenAlerts.map((alert) => (
+            <div
+              className={`rounded-md border p-4 ${alert.tone === 'amber' ? 'border-amber-200 bg-amber-50 text-amber-800' : 'border-red-200 bg-red-50 text-red-800'}`}
+              key={alert.key}
+            >
+              <p className="text-sm font-semibold">{alert.title}</p>
+              <p className="mt-1 text-sm leading-6">{alert.message}</p>
+            </div>
+          ))}
         </div>
         <div className="mt-4 overflow-hidden rounded-md border border-slate-100">
           <table className="w-full text-left text-sm">
@@ -604,7 +663,7 @@ function AlertsView({ data }) {
                   <td className="px-4 py-3 font-medium text-slate-700">{signal}</td>
                   <td className="px-4 py-3 font-mono text-slate-600">{value}</td>
                   <td className="px-4 py-3">
-                    <span className={`rounded-md px-2 py-1 text-xs font-semibold ${rowStatus === 'Outlier' || rowStatus === 'High' || rowStatus === 'Caution' || rowStatus === 'Review' ? 'bg-red-50 text-red-700' : 'bg-emerald-50 text-emerald-700'}`}>
+                    <span className={`rounded-md px-2 py-1 text-xs font-semibold ${ALERT_STATUSES.has(rowStatus) ? 'bg-red-50 text-red-700' : 'bg-emerald-50 text-emerald-700'}`}>
                       {rowStatus}
                     </span>
                   </td>
