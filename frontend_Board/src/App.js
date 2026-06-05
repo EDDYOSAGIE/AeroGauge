@@ -21,6 +21,7 @@ import axios from 'axios';
 
 const API_BASE_URL = process.env.REACT_APP_API_BASE_URL || 'http://127.0.0.1:5000';
 const GOOGLE_CLIENT_ID = process.env.REACT_APP_GOOGLE_CLIENT_ID;
+const ACTIVE_ALERT_WINDOW_MS = 5 * 60 * 1000;
 
 const defaultData = {
   node_id: 'N/A',
@@ -33,6 +34,7 @@ const defaultData = {
   composite_trend_value: 0,
   anomaly: false,
   integrity: 'pending',
+  telemetry_quality: 'waiting',
   security: {
     ids_status: 'CLEAR',
     warning_led: false,
@@ -440,22 +442,38 @@ function SecurityPanel({ security }) {
 }
 
 function getAlertRows(data) {
+  const hasTelemetry = data.telemetry_quality !== 'waiting' && data.node_id !== 'None' && data.node_id !== 'N/A';
+
   return [
     ['Relay packet', data.node_id, data.anomaly ? 'Review' : 'Clean'],
     ['Vibration', data.vibr_x.toFixed(3), data.vibr_x > 0.5 ? 'High' : 'Stable'],
     ['Motor temp', `${data.m_temp.toFixed(1)} deg C`, data.m_temp > 40 ? 'Caution' : 'Normal'],
     ['Pressure', `${data.press.toFixed(0)} hPa`, 'Tracked'],
     ['AI deviation score', data.cluster_distance.toFixed(2), data.anomaly ? 'Outlier' : 'Accepted'],
-    ['Integrity', data.integrity || 'pending', data.integrity === 'verified' ? 'Verified' : 'Review'],
+    ['Integrity', data.integrity || 'pending', data.integrity === 'verified' ? 'Verified' : hasTelemetry ? 'Review' : 'Pending'],
   ];
 }
 
+function isRecentIncident(incident) {
+  if (!incident?.created_at) {
+    return false;
+  }
+
+  const createdAt = new Date(incident.created_at).getTime();
+  return Number.isFinite(createdAt) && Date.now() - createdAt <= ACTIVE_ALERT_WINDOW_MS;
+}
+
 function getAlertCount(data) {
-  const signalAlerts = getAlertRows(data).filter(([, , rowStatus]) => (
-    rowStatus === 'Outlier' || rowStatus === 'High' || rowStatus === 'Caution' || rowStatus === 'Review'
-  )).length;
+  const hasTelemetry = data.telemetry_quality !== 'waiting' && data.node_id !== 'None' && data.node_id !== 'N/A';
+  const signalAlerts = hasTelemetry
+    ? getAlertRows(data).filter(([, , rowStatus]) => (
+      rowStatus === 'Outlier' || rowStatus === 'High' || rowStatus === 'Caution' || rowStatus === 'Review'
+    )).length
+    : 0;
   const incidentAlerts = data.security?.recent_incidents?.filter((incident) => (
-    incident.severity === 'medium' || incident.severity === 'high' || incident.severity === 'critical'
+    isRecentIncident(incident) && (
+      incident.severity === 'medium' || incident.severity === 'high' || incident.severity === 'critical'
+    )
   )).length || 0;
   return signalAlerts + incidentAlerts;
 }
