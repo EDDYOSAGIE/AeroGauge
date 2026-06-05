@@ -5,6 +5,8 @@ import zlib
 from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
 
+from supabase_storage import insert_security_incident
+
 
 DEVICE_TOKEN = os.getenv("DEVICE_TOKEN", "development-device-token")
 TELEMETRY_SECRET = os.getenv("TELEMETRY_SECRET", "development-telemetry-secret")
@@ -38,6 +40,9 @@ def _remember(counter, key, window_seconds):
 
 
 def create_incident(db, event_type, severity, source, details):
+    created_at = iso_now()
+    buzzer_triggered = severity in {"high", "critical"}
+    led_triggered = severity in {"medium", "high", "critical"}
     db.execute(
         """
         INSERT INTO security_incidents
@@ -49,11 +54,23 @@ def create_incident(db, event_type, severity, source, details):
             severity,
             source,
             details,
-            int(severity in {"high", "critical"}),
-            int(severity in {"medium", "high", "critical"}),
-            iso_now(),
+            int(buzzer_triggered),
+            int(led_triggered),
+            created_at,
         ),
     )
+    try:
+        insert_security_incident({
+            "event_type": event_type,
+            "severity": severity,
+            "source": source,
+            "details": details,
+            "buzzer_triggered": buzzer_triggered,
+            "led_triggered": led_triggered,
+            "created_at": created_at,
+        })
+    except Exception as exc:
+        print(f"Supabase security incident sync failed: {exc}")
 
 
 def record_failed_login(db, operator_id, source):

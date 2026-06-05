@@ -17,7 +17,13 @@ from security_layer import (
     validate_device_token,
     validate_integrity,
 )
-from supabase_storage import insert_telemetry, is_enabled as supabase_enabled, latest_telemetry
+from supabase_storage import (
+    insert_session,
+    insert_telemetry,
+    is_enabled as supabase_enabled,
+    latest_telemetry,
+    upsert_operator,
+)
 
 app = Flask(__name__)
 CORS(app) # Allows React to talk to Flask
@@ -137,6 +143,8 @@ def create_session(operator_id):
     token = secrets.token_urlsafe(32)
     now = datetime.now(timezone.utc)
     expires_at = now + timedelta(hours=SESSION_HOURS)
+    created_at = now.isoformat()
+    expires_at_iso = expires_at.isoformat()
 
     with get_db() as db:
         db.execute(
@@ -144,10 +152,15 @@ def create_session(operator_id):
             INSERT INTO sessions (token, operator_id, expires_at, created_at)
             VALUES (?, ?, ?, ?)
             """,
-            (token, operator_id, expires_at.isoformat(), now.isoformat()),
+            (token, operator_id, expires_at_iso, created_at),
         )
 
-    return token, expires_at.isoformat()
+    try:
+        insert_session(token, operator_id, expires_at_iso, created_at)
+    except Exception as exc:
+        print(f"Supabase session sync failed: {exc}")
+
+    return token, expires_at_iso
 
 
 def normalize_operator_id(operator_id):
@@ -243,10 +256,11 @@ def upsert_google_operator(profile, organisation):
     email = profile["email"].strip().lower()
     full_name = profile.get("name") or email.split("@")[0]
     now = utc_iso()
+    password_hash = generate_password_hash(secrets.token_urlsafe(32))
 
     with get_db() as db:
         operator = db.execute(
-            "SELECT operator_id, full_name, organisation FROM operators WHERE operator_id = ?",
+            "SELECT operator_id, full_name, organisation, password_hash, created_at FROM operators WHERE operator_id = ?",
             (email,),
         ).fetchone()
 
@@ -256,15 +270,24 @@ def upsert_google_operator(profile, organisation):
                 INSERT INTO operators (operator_id, full_name, organisation, password_hash, created_at)
                 VALUES (?, ?, ?, ?, ?)
                 """,
-                (email, full_name, organisation, generate_password_hash(secrets.token_urlsafe(32)), now),
+                (email, full_name, organisation, password_hash, now),
             )
             operator = {
                 "operator_id": email,
                 "full_name": full_name,
                 "organisation": organisation,
+                "password_hash": password_hash,
+                "created_at": now,
             }
 
-    return dict(operator)
+    operator = dict(operator)
+    try:
+        upsert_operator(operator)
+    except Exception as exc:
+        print(f"Supabase operator sync failed: {exc}")
+
+    operator.pop("password_hash", None)
+    return operator
 
 
 @app.route('/auth/signup', methods=['POST'])
@@ -281,6 +304,9 @@ def signup():
     if len(password) < 6:
         return jsonify({"status": "error", "message": "Password must be at least 6 characters"}), 400
 
+    password_hash = generate_password_hash(password)
+    created_at = datetime.now(timezone.utc).isoformat()
+
     try:
         with get_db() as db:
             db.execute(
@@ -292,12 +318,23 @@ def signup():
                     operator_id,
                     full_name,
                     organisation,
-                    generate_password_hash(password),
-                    datetime.now(timezone.utc).isoformat(),
+                    password_hash,
+                    created_at,
                 ),
             )
     except sqlite3.IntegrityError:
         return jsonify({"status": "error", "message": "Operator ID already exists"}), 409
+
+    try:
+        upsert_operator({
+            "operator_id": operator_id,
+            "full_name": full_name,
+            "organisation": organisation,
+            "password_hash": password_hash,
+            "created_at": created_at,
+        })
+    except Exception as exc:
+        print(f"Supabase operator sync failed: {exc}")
 
     token, expires_at = create_session(operator_id)
     return jsonify({
@@ -317,7 +354,7 @@ def login():
 
     with get_db() as db:
         operator = db.execute(
-            "SELECT operator_id, full_name, organisation, password_hash FROM operators WHERE operator_id = ?",
+            "SELECT operator_id, full_name, organisation, password_hash, created_at FROM operators WHERE operator_id = ?",
             (operator_id,),
         ).fetchone()
 
@@ -325,6 +362,11 @@ def login():
         with get_db() as db:
             record_failed_login(db, operator_id, source)
         return jsonify({"status": "error", "message": "Invalid operator ID or password"}), 401
+
+    try:
+        upsert_operator(dict(operator))
+    except Exception as exc:
+        print(f"Supabase operator sync failed: {exc}")
 
     token, expires_at = create_session(operator_id)
     return jsonify({

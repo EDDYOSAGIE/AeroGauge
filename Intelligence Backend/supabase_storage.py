@@ -27,6 +27,75 @@ def _table_url(table_name):
     return f"{SUPABASE_URL}/rest/v1/{table_name}"
 
 
+def _post(table_name, row, prefer="return=minimal", params=None):
+    if not is_enabled():
+        return False
+
+    response = requests.post(
+        _table_url(table_name),
+        params=params,
+        json=row,
+        headers=_headers(prefer),
+        timeout=SUPABASE_TIMEOUT_SECONDS,
+    )
+    response.raise_for_status()
+    return True
+
+
+def upsert_organisation(name):
+    return _post(
+        "organisations",
+        {"name": name},
+        prefer="resolution=merge-duplicates,return=minimal",
+        params={"on_conflict": "name"},
+    )
+
+
+def upsert_operator(operator):
+    upsert_organisation(operator["organisation"])
+    row = {
+        "operator_id": operator["operator_id"],
+        "full_name": operator["full_name"],
+        "organisation": operator["organisation"],
+        "password_hash": operator["password_hash"],
+        "role": operator.get("role", "operator"),
+        "status": operator.get("status", "active"),
+        "created_at": operator.get("created_at"),
+        "updated_at": operator.get("updated_at") or operator.get("created_at"),
+    }
+    return _post(
+        "operators",
+        row,
+        prefer="resolution=merge-duplicates,return=minimal",
+        params={"on_conflict": "operator_id"},
+    )
+
+
+def insert_session(token, operator_id, expires_at, created_at):
+    return _post(
+        "sessions",
+        {
+            "token": token,
+            "operator_id": operator_id,
+            "expires_at": expires_at,
+            "created_at": created_at,
+        },
+    )
+
+
+def insert_security_incident(incident):
+    row = {
+        "event_type": incident["event_type"],
+        "severity": incident["severity"],
+        "source": incident["source"],
+        "details": incident["details"],
+        "buzzer_triggered": bool(incident.get("buzzer_triggered")),
+        "led_triggered": bool(incident.get("led_triggered")),
+        "created_at": incident["created_at"],
+    }
+    return _post("security_incidents", row)
+
+
 def insert_telemetry(payload):
     if not is_enabled():
         return False
