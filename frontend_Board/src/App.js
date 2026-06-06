@@ -7,6 +7,7 @@ import {
   CircleDot,
   CloudSun,
   Compass,
+  Clock3,
   Gauge,
   LayoutDashboard,
   LogIn,
@@ -22,7 +23,7 @@ import axios from 'axios';
 const API_BASE_URL = process.env.REACT_APP_API_BASE_URL || 'http://127.0.0.1:5000';
 const GOOGLE_CLIENT_ID = process.env.REACT_APP_GOOGLE_CLIENT_ID;
 const ACTIVE_ALERT_WINDOW_MS = 5 * 60 * 1000;
-const ALERT_STATUSES = new Set(['Outlier', 'High', 'Caution', 'Review']);
+const ALERT_STATUSES = new Set(['Outlier', 'High', 'Caution', 'Review', 'Critical']);
 
 const defaultData = {
   node_id: 'N/A',
@@ -36,6 +37,20 @@ const defaultData = {
   anomaly: false,
   integrity: 'pending',
   telemetry_quality: 'waiting',
+  baseline_status: 'nominal',
+  baseline: {
+    standard: 'ISA / RTCA DO-160 physical anchors',
+    altitude_ft: 0,
+    temperature_location: 'internal',
+    vibration_normal_g: [0.5, 1.5],
+    vibration_critical_g: 5,
+    pressure_isa_mb: 1013.25,
+    pressure_minimum_mb: 750,
+    temperature_isa_c: 15,
+    temperature_critical_c: 55,
+    status: 'nominal',
+    alerts: [],
+  },
   security: {
     ids_status: 'CLEAR',
     warning_led: false,
@@ -45,19 +60,19 @@ const defaultData = {
 
 const historySeed = [28, 44, 32, 51, 46, 68, 59, 73, 66, 78, 71, 84];
 
+const navigationItems = [
+  { key: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
+  { key: 'flight-data', label: 'Telemetry', icon: Radio },
+  { key: 'analysis', label: 'Mesh Analysis', icon: BarChart3 },
+  { key: 'alerts', label: 'Alerts', icon: AlertTriangle },
+  { key: 'operators', label: 'Operators', icon: ShieldCheck },
+];
+
 function authHeaders(token) {
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
 function Sidebar({ activeTab, alertCount, onLogout, onTabChange }) {
-  const items = [
-    { key: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
-    { key: 'flight-data', label: 'Flight Data', icon: Radio },
-    { key: 'analysis', label: 'Analysis', icon: BarChart3 },
-    { key: 'alerts', label: 'Alerts', icon: AlertTriangle },
-    { key: 'operators', label: 'Operators', icon: ShieldCheck },
-  ];
-
   return (
     <aside className="hidden min-h-screen w-60 bg-slate-950 text-slate-100 lg:block">
       <div className="border-b border-slate-800 px-6 py-5">
@@ -72,7 +87,7 @@ function Sidebar({ activeTab, alertCount, onLogout, onTabChange }) {
         </div>
       </div>
       <nav className="px-3 py-4">
-        {items.map((item) => (
+        {navigationItems.map((item) => (
           <button
             className={`mb-1 flex w-full items-center gap-3 rounded-md px-3 py-2.5 text-sm font-medium transition ${
               activeTab === item.key ? 'bg-slate-800 text-white shadow-sm' : 'text-slate-200 hover:bg-white/10'
@@ -97,6 +112,33 @@ function Sidebar({ activeTab, alertCount, onLogout, onTabChange }) {
         </button>
       </div>
     </aside>
+  );
+}
+
+function MobileTabBar({ activeTab, alertCount, onTabChange }) {
+  return (
+    <nav className="fixed inset-x-0 bottom-0 z-20 border-t border-slate-200 bg-white px-2 pb-2 pt-2 shadow-[0_-8px_24px_rgba(15,23,42,0.12)] lg:hidden">
+      <div className="grid grid-cols-5 gap-1">
+        {navigationItems.map((item) => (
+          <button
+            className={`relative flex min-h-14 flex-col items-center justify-center rounded-md px-1 text-[11px] font-semibold transition ${
+              activeTab === item.key ? 'bg-sky-50 text-sky-700' : 'text-slate-500 hover:bg-slate-50'
+            }`}
+            key={item.key}
+            onClick={() => onTabChange(item.key)}
+            type="button"
+          >
+            <item.icon size={18} />
+            <span className="mt-1 max-w-full truncate">{item.label}</span>
+            {item.key === 'alerts' && alertCount > 0 && (
+              <span className="absolute right-2 top-1 min-w-5 rounded-full bg-red-500 px-1 text-center text-[10px] font-semibold text-white">
+                {alertCount}
+              </span>
+            )}
+          </button>
+        ))}
+      </div>
+    </nav>
   );
 }
 
@@ -194,21 +236,21 @@ function AuthScreen({ onAuthenticated }) {
                 <Compass size={24} />
               </div>
               <div>
-                <h1 className="text-xl font-semibold"></h1>
-                <p className="text-sm text-sky-200">AeroGauge</p>
+                <h1 className="text-xl font-semibold">AeroGauge</h1>
+                <p className="text-sm text-sky-200">Aviation mesh intelligence</p>
               </div>
             </div>
             <div className="mt-16 max-w-md">
               <p className="text-xs font-semibold uppercase text-sky-300">Operator access</p>
-              <h2 className="mt-3 text-4xl font-semibold leading-tight">The Future of Flight safety </h2>
+              <h2 className="mt-3 text-4xl font-semibold leading-tight">Aviation-grade telemetry command</h2>
               <p className="mt-4 leading-7 text-sky-100">
-                Sign in to get real time reviews and analysis on flight health telemetries and engine data
+                Sign in for real-time mesh analysis and secure operator review of flight health telemetry.
               </p>
             </div>
             <div className="mt-12 grid gap-3 sm:grid-cols-3 lg:grid-cols-1">
               {[
-                ['ESP-NOW Relay', 'Serial bridge active'],
-                ['AI Analysis', 'Filtered sensor insight'],
+                ['Mesh Telemetry', 'Secure gateway active'],
+                ['Model Intelligence', 'Aviation-grade review'],
                 ['Operator Audit', 'Database-backed access'],
               ].map(([title, body]) => (
                 <div className="rounded-lg border border-white/10 bg-white/10 p-4" key={title}>
@@ -336,7 +378,7 @@ function TelemetryChart({ data }) {
       <div className="flex items-center justify-between">
         <div>
           <h2 className="font-semibold text-white">Telemetry Trend</h2>
-          <p className="mt-1 text-sm text-slate-400">Composite signal from vibration, temperature, pressure, and AI confidence.</p>
+          <p className="mt-1 text-sm text-slate-400">Composite signal from vibration, temperature, pressure, and model confidence.</p>
         </div>
         <span className="rounded-md bg-slate-800 px-3 py-2 text-xs font-semibold text-slate-100">LIVE</span>
       </div>
@@ -362,11 +404,11 @@ function MiniWave({ data }) {
     <section className="rounded-lg border border-slate-700 bg-slate-900 p-5 shadow-sm">
       <div className="flex items-center gap-3 text-slate-100">
         <Gauge size={21} />
-        <h2 className="font-semibold text-white">AI Health Profile</h2>
+        <h2 className="font-semibold text-white">Mesh Health Profile</h2>
       </div>
       <div className="mt-5 flex items-end justify-between">
         <div>
-          <p className="text-sm text-slate-400">AI deviation score</p>
+          <p className="text-sm text-slate-400">Mesh deviation score</p>
           <p className="mt-1 font-mono text-4xl font-semibold text-white">{data.cluster_distance.toFixed(2)}</p>
           <p className="mt-2 text-sm text-slate-400">Confidence {Number(data.ai_confidence ?? 0).toFixed(0)}%</p>
         </div>
@@ -374,7 +416,7 @@ function MiniWave({ data }) {
           {data.anomaly ? 'OUTLIER' : 'IN RANGE'}
         </span>
       </div>
-      <svg className="mt-6 h-28 w-full" viewBox="0 0 264 100" role="img" aria-label="AI health profile">
+      <svg className="mt-6 h-28 w-full" viewBox="0 0 264 100" role="img" aria-label="Mesh health profile">
         <polyline fill="none" points={polyline} stroke="#f8fafc" strokeLinecap="round" strokeLinejoin="round" strokeWidth="4" />
         <line stroke="#fecaca" strokeDasharray="5 5" strokeWidth="2" x1="0" x2="264" y1="35" y2="35" />
       </svg>
@@ -446,11 +488,11 @@ function getAlertRows(data) {
   const hasTelemetry = hasLiveTelemetry(data);
 
   return [
-    ['Relay packet', data.node_id, data.anomaly ? 'Review' : 'Clean'],
+    ['Mesh packet', data.node_id, data.anomaly ? 'Review' : 'Clean'],
     ['Vibration', data.vibr_x.toFixed(3), data.vibr_x > 0.5 ? 'High' : 'Stable'],
     ['Motor temp', `${data.m_temp.toFixed(1)} deg C`, data.m_temp > 40 ? 'Caution' : 'Normal'],
     ['Pressure', `${data.press.toFixed(0)} hPa`, 'Tracked'],
-    ['AI deviation score', data.cluster_distance.toFixed(2), data.anomaly ? 'Outlier' : 'Accepted'],
+    ['Mesh deviation score', data.cluster_distance.toFixed(2), data.anomaly ? 'Outlier' : 'Accepted'],
     ['Integrity', data.integrity || 'pending', data.integrity === 'verified' ? 'Verified' : hasTelemetry ? 'Review' : 'Pending'],
   ];
 }
@@ -489,11 +531,11 @@ function getAlertCount(data) {
 function getWrittenAlerts(data) {
   const telemetryMessages = getActiveAlertRows(data).map(([signal, value, rowStatus]) => {
     const descriptions = {
-      'Relay packet': `The latest relay packet from ${value} needs operator review because the AI marked the telemetry pattern as abnormal.`,
+      'Mesh packet': `The latest mesh telemetry packet from ${value} needs operator review because the pattern was marked abnormal.`,
       Vibration: `Vibration is high at ${value} G. Inspect the airframe reading before continuing normal monitoring.`,
       'Motor temp': `Motor temperature is in caution range at ${value}. Check cooling and operating load.`,
       Pressure: `Pressure reading is being tracked at ${value}.`,
-      'AI deviation score': `AI deviation score is ${value}, outside the learned healthy operating profile.`,
+      'Mesh deviation score': `Mesh deviation score is ${value}, outside the learned healthy operating profile.`,
       Integrity: `Telemetry integrity is ${value}. Review packet verification before trusting this feed.`,
     };
 
@@ -526,10 +568,23 @@ function buildAnalysis(data) {
   const pressureState = data.press > 0 ? `pressure is tracking at ${data.press.toFixed(0)} hPa` : 'pressure has not reported a live value yet';
 
   if (data.anomaly) {
-    return `The AI analysis is marking this telemetry pattern as outside the healthy operating envelope. Vibration is ${vibrationState}, motor temperature is ${thermalState}, and ${pressureState}. The operator should review the relay packet and inspect the airframe before continuing normal flight observation.`;
+    return `Mesh analysis is marking this telemetry pattern as outside the healthy operating envelope. Vibration is ${vibrationState}, motor temperature is ${thermalState}, and ${pressureState}. The operator should review the telemetry packet and airframe condition before continuing normal flight observation.`;
   }
 
-  return `The AI analysis is accepting the latest telemetry as normal. The deviation score is ${data.cluster_distance.toFixed(2)}, vibration is ${vibrationState}, motor temperature is ${thermalState}, and ${pressureState}. Continue monitoring the feed because any sharp movement in distance or temperature will change this assessment in real time.`;
+  return `Mesh analysis is accepting the latest telemetry as normal. The deviation score is ${data.cluster_distance.toFixed(2)}, vibration is ${vibrationState}, motor temperature is ${thermalState}, and ${pressureState}. Continue monitoring the feed because any sharp movement in distance or temperature will change this assessment in real time.`;
+}
+
+function formatSessionHoursRemaining(expiresAt) {
+  if (!expiresAt) {
+    return '12.0';
+  }
+
+  const remainingMs = new Date(expiresAt).getTime() - Date.now();
+  if (!Number.isFinite(remainingMs)) {
+    return '12.0';
+  }
+
+  return Math.max(0, remainingMs / (1000 * 60 * 60)).toFixed(1);
 }
 
 function TelemetryCards({ data }) {
@@ -538,7 +593,7 @@ function TelemetryCards({ data }) {
       <StatCard icon={Activity} label="Vibration" value={data.vibr_x.toFixed(3)} unit="G" color="bg-sky-50 text-sky-700" change="Airframe vibration index" />
       <StatCard icon={Thermometer} label="Motor Temp" value={data.m_temp.toFixed(1)} unit="deg C" color="bg-amber-50 text-amber-700" change={data.m_temp > 40 ? 'Thermal caution' : 'Thermal stable'} />
       <StatCard icon={CloudSun} label="Pressure" value={data.press.toFixed(0)} unit="hPa" color="bg-cyan-50 text-cyan-700" change="Environmental pressure" />
-      <StatCard icon={CircleDot} label="Node" value={data.node_id} unit="" color="bg-emerald-50 text-emerald-700" change="Active ESP relay" />
+      <StatCard icon={CircleDot} label="Node" value={data.node_id} unit="" color="bg-emerald-50 text-emerald-700" change="Active mesh node" />
     </section>
   );
 }
@@ -549,9 +604,10 @@ function FlightDataView({ data }) {
     ['Vibration X', `${data.vibr_x.toFixed(3)} G`],
     ['Motor temperature', `${data.m_temp.toFixed(1)} deg C`],
     ['Pressure', `${data.press.toFixed(0)} hPa`],
-    ['AI profile group', data.cluster ?? 0],
-    ['AI deviation score', data.cluster_distance.toFixed(2)],
-    ['AI confidence', `${Number(data.ai_confidence ?? 0).toFixed(0)}%`],
+    ['Altitude reference', `${Number(data.altitude_ft ?? 0).toFixed(0)} ft`],
+    ['Mesh profile group', data.cluster ?? 0],
+    ['Mesh deviation score', data.cluster_distance.toFixed(2)],
+    ['Model confidence', `${Number(data.ai_confidence ?? 0).toFixed(0)}%`],
     ['Composite trend', (data.composite_trend_value ?? 0).toFixed(2)],
     ['Telemetry integrity', data.integrity || 'pending'],
   ];
@@ -563,7 +619,7 @@ function FlightDataView({ data }) {
         <TelemetryChart data={data} />
         <div className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
           <h2 className="font-semibold text-slate-950">Live Sensor Telemetry</h2>
-          <p className="mt-1 text-sm text-slate-500">Real-time values received from the ESP relay and backend inference.</p>
+          <p className="mt-1 text-sm text-slate-500">Real-time values received from the secure mesh gateway and backend inference.</p>
           <div className="mt-4 overflow-hidden rounded-md border border-slate-100">
             <table className="w-full text-left text-sm">
               <tbody className="divide-y divide-slate-100">
@@ -591,8 +647,8 @@ function AnalysisView({ data }) {
       <div className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
         <div className="flex items-center justify-between gap-3">
           <div>
-            <h2 className="font-semibold text-slate-950">Live AI Analysis</h2>
-            <p className="mt-1 text-sm text-slate-500">Natural-language explanation generated from the current telemetry state.</p>
+            <h2 className="font-semibold text-slate-950">Live Mesh Analysis</h2>
+            <p className="mt-1 text-sm text-slate-500">Operational explanation generated from the current telemetry state.</p>
           </div>
           <span className={`rounded-md px-3 py-2 text-xs font-semibold ${data.anomaly ? 'bg-red-50 text-red-700' : 'bg-emerald-50 text-emerald-700'}`}>
             {data.anomaly ? 'OUTLIER' : 'IN RANGE'}
@@ -603,7 +659,7 @@ function AnalysisView({ data }) {
           {[
             ['Vibration input', `${data.vibr_x.toFixed(3)} G`, data.vibr_x > 0.5 ? 'Elevated' : 'Stable'],
             ['Thermal input', `${data.m_temp.toFixed(1)} deg C`, data.m_temp > 40 ? 'Caution' : 'Stable'],
-            ['AI deviation', data.cluster_distance.toFixed(2), data.anomaly ? 'Outside envelope' : 'Healthy envelope'],
+            ['Mesh deviation', data.cluster_distance.toFixed(2), data.anomaly ? 'Outside envelope' : 'Healthy envelope'],
           ].map(([label, value, status]) => (
             <div className="rounded-md border border-slate-100 bg-slate-50 p-4" key={label}>
               <p className="text-xs font-semibold uppercase text-slate-400">{label}</p>
@@ -717,11 +773,12 @@ function OperatorsView({ operator, operators }) {
   );
 }
 
-function Dashboard({ activeTab, data, operator, operators, onLogout, onTabChange }) {
+function Dashboard({ activeTab, data, operator, operators, sessionExpiresAt, onLogout, onTabChange }) {
   const status = data.anomaly ? 'Alert Review' : 'Nominal';
   const statusTone = data.anomaly ? 'bg-red-50 text-red-700 border-red-200' : 'bg-emerald-50 text-emerald-700 border-emerald-200';
   const operatorName = operator?.full_name || operator?.operator_id || 'Operator';
   const alertCount = getAlertCount(data);
+  const sessionHours = formatSessionHoursRemaining(sessionExpiresAt);
 
   const analysis = useMemo(() => {
     return buildAnalysis(data);
@@ -730,7 +787,7 @@ function Dashboard({ activeTab, data, operator, operators, onLogout, onTabChange
   const tabTitles = {
     dashboard: ['Real-time flight health', 'Operations Dashboard'],
     'flight-data': ['Sensor telemetry stream', 'Flight Data'],
-    analysis: ['AI telemetry explanation', 'Analysis'],
+    analysis: ['Mesh telemetry explanation', 'Mesh Analysis'],
     alerts: ['Operator alert queue', 'Alerts'],
     operators: ['Organisation access control', 'Operators'],
   };
@@ -751,6 +808,10 @@ function Dashboard({ activeTab, data, operator, operators, onLogout, onTabChange
                 {data.anomaly ? <AlertTriangle size={18} /> : <CheckCircle2 size={18} />}
                 {status}
               </div>
+              <div className="flex items-center gap-2 rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-200">
+                <Clock3 size={17} />
+                {sessionHours}h session
+              </div>
               <div className="rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-200">
                 {operatorName}
               </div>
@@ -762,7 +823,7 @@ function Dashboard({ activeTab, data, operator, operators, onLogout, onTabChange
           </div>
         </header>
 
-        <div className="p-5">
+        <div className="pb-24 p-5 lg:pb-5">
           {activeTab === 'dashboard' && (
             <>
               <TelemetryCards data={data} />
@@ -772,10 +833,10 @@ function Dashboard({ activeTab, data, operator, operators, onLogout, onTabChange
               </section>
               <section className="mt-4 grid gap-4 xl:grid-cols-[0.95fr_1.05fr]">
                 <div className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
-                  <h2 className="font-semibold text-slate-950">Backend Analysis</h2>
+                  <h2 className="font-semibold text-slate-950">Mesh Analysis</h2>
                   <p className="mt-3 leading-7 text-slate-600">{analysis}</p>
                   <div className="mt-5 rounded-md bg-slate-50 p-4">
-                    <p className="text-xs font-semibold uppercase text-slate-400">AI basis</p>
+                    <p className="text-xs font-semibold uppercase text-slate-400">Model basis</p>
                     <p className="mt-2 text-sm text-slate-600">Filtered vibration, temperature, and pressure are compared with the learned healthy operating profile.</p>
                   </div>
                 </div>
@@ -789,6 +850,7 @@ function Dashboard({ activeTab, data, operator, operators, onLogout, onTabChange
           {activeTab === 'operators' && <OperatorsView operator={operator} operators={operators} />}
         </div>
       </section>
+      <MobileTabBar activeTab={activeTab} alertCount={alertCount} onTabChange={onTabChange} />
     </main>
   );
 }
@@ -862,6 +924,7 @@ function App() {
       data={data}
       operator={session.operator}
       operators={operators}
+      sessionExpiresAt={session.expires_at}
       onLogout={handleLogout}
       onTabChange={setActiveTab}
     />

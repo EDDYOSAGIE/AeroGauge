@@ -6,7 +6,7 @@ from pathlib import Path
 
 import joblib
 import numpy as np
-from sklearn.cluster import KMeans
+from sklearn.cluster import MiniBatchKMeans
 from sklearn.metrics import silhouette_score
 from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
@@ -18,28 +18,32 @@ MODEL_DIR = BASE_DIR / "models"
 DEFAULT_MODEL_PATH = MODEL_DIR / "flight_kmeans_model.joblib"
 DEFAULT_METRICS_PATH = MODEL_DIR / "flight_kmeans_metrics.json"
 
-# The ESP relay prints exactly: vibration,temp,pressure
+# The telemetry gateway prints exactly: vibration,temp,pressure
 FEATURE_NAMES = ("vibration", "temperature", "pressure")
 
-# Baseline healthy flight data in the same order as FEATURE_NAMES.
-# Replace these rows or pass a CSV file to train_kmeans_model.py when real ESP
-# samples are collected.
+# Baseline healthy flight data in the same order as FEATURE_NAMES. These rows
+# anchor the first model around ISA sea-level conditions and a normal 0.5g-1.5g
+# vibration band before real aircraft telemetry is collected.
 DEFAULT_HEALTHY_DATA = np.array(
     [
-        [0.10, 30.5, 1012.8],
-        [0.12, 30.6, 1013.2],
-        [0.09, 30.4, 1011.9],
-        [0.11, 30.5, 1012.6],
-        [0.15, 30.7, 1013.5],
-        [0.08, 30.3, 1011.4],
-        [0.13, 30.8, 1014.0],
-        [0.10, 30.5, 1013.0],
+        [0.70, 14.6, 1012.8],
+        [0.82, 15.0, 1013.2],
+        [0.95, 15.2, 1011.9],
+        [1.05, 14.8, 1012.6],
+        [1.18, 15.4, 1013.5],
+        [1.32, 14.5, 1011.4],
+        [1.44, 15.6, 1014.0],
+        [1.00, 15.1, 1013.0],
+        [0.64, 13.8, 1009.7],
+        [1.26, 16.0, 1016.1],
+        [0.88, 14.2, 1010.4],
+        [1.12, 15.7, 1015.0],
     ],
     dtype=float,
 )
 
 DEFAULT_ANOMALY_THRESHOLD = 3.0
-MODEL_VERSION = 1
+MODEL_VERSION = 2
 
 
 @dataclass
@@ -77,6 +81,20 @@ class FlightKMeansModel:
             "cluster_distance": distance,
             "anomaly": distance > self.threshold,
         }
+
+    def supports_online_learning(self):
+        return hasattr(self.pipeline.named_steps["kmeans"], "partial_fit")
+
+    def partial_fit_nominal(self, values):
+        points = self._as_array(values)
+        if not self.supports_online_learning():
+            return False
+
+        scaler = self.pipeline.named_steps["scaler"]
+        kmeans = self.pipeline.named_steps["kmeans"]
+        scaled_points = scaler.transform(points)
+        kmeans.partial_fit(scaled_points)
+        return True
 
     def save(self, path=DEFAULT_MODEL_PATH):
         path = Path(path)
@@ -188,10 +206,12 @@ def train_kmeans_model(
     pipeline = Pipeline(
         steps=[
             ("scaler", StandardScaler()),
-            (
-                "kmeans",
-                KMeans(n_clusters=n_clusters, n_init=10, random_state=random_state),
-            ),
+            ("kmeans", MiniBatchKMeans(
+                n_clusters=n_clusters,
+                n_init=10,
+                random_state=random_state,
+                batch_size=max(16, len(train_data)),
+            )),
         ]
     )
     pipeline.fit(train_data)

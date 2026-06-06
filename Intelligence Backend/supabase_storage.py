@@ -105,6 +105,8 @@ def insert_telemetry(payload):
         "vibr_x": payload.get("vibr_x"),
         "m_temp": payload.get("m_temp"),
         "press": payload.get("press"),
+        "altitude_ft": payload.get("altitude_ft"),
+        "temp_location": payload.get("temp_location"),
         "cluster": payload.get("cluster"),
         "cluster_distance": payload.get("cluster_distance"),
         "ai_confidence": payload.get("ai_confidence"),
@@ -112,6 +114,8 @@ def insert_telemetry(payload):
         "anomaly": payload.get("anomaly"),
         "telemetry_quality": payload.get("telemetry_quality"),
         "integrity": payload.get("integrity"),
+        "baseline_status": payload.get("baseline_status"),
+        "baseline": payload.get("baseline"),
         "received_at": payload.get("received_at"),
     }
     response = requests.post(

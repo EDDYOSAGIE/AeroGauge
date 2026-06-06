@@ -11,6 +11,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 from werkzeug.security import check_password_hash, generate_password_hash
 
+from aviation_baselines import baseline_summary, evaluate_physical_baselines
 from security_layer import (
     record_failed_login,
     security_summary,
@@ -37,6 +38,7 @@ TELEMETRY_LIMITS = {
     "vibr_x": (0.0, 20.0),
     "m_temp": (-40.0, 125.0),
     "press": (300.0, 1100.0),
+    "altitude_ft": (0.0, 45000.0),
     "cluster_distance": (0.0, 1000.0),
     "ai_confidence": (0.0, 100.0),
 }
@@ -172,12 +174,15 @@ latest_flight_data = {
     "vibr_x": 0.0,
     "m_temp": 0.0,
     "press": 0,
+    "altitude_ft": 0.0,
+    "temp_location": "internal",
     "cluster": 0,
     "cluster_distance": 0.0,
     "ai_confidence": 0.0,
     "composite_trend_value": 0.0,
     "anomaly": False,
     "telemetry_quality": "waiting",
+    "baseline": baseline_summary(),
 }
 telemetry_window = []
 anomaly_streak = 0
@@ -217,11 +222,16 @@ def validate_and_filter_telemetry(payload):
         "vibr_x": parse_float_field(payload, "vibr_x"),
         "m_temp": parse_float_field(payload, "m_temp"),
         "press": parse_float_field(payload, "press"),
+        "altitude_ft": parse_float_field(payload, "altitude_ft") if "altitude_ft" in payload else 0.0,
+        "temp_location": str(payload.get("temp_location", "internal")).strip().lower() or "internal",
         "cluster": int(payload.get("cluster", 0)),
         "cluster_distance": parse_float_field(payload, "cluster_distance") if "cluster_distance" in payload else 0.0,
         "ai_confidence": parse_float_field(payload, "ai_confidence") if "ai_confidence" in payload else 0.0,
         "raw_anomaly": parse_bool_field(payload, "anomaly"),
     }
+
+    if candidate["temp_location"] not in {"internal", "external"}:
+        candidate["temp_location"] = "internal"
 
     for field, (minimum, maximum) in TELEMETRY_LIMITS.items():
         if not minimum <= candidate[field] <= maximum:
@@ -232,14 +242,19 @@ def validate_and_filter_telemetry(payload):
             if abs(candidate[field] - float(latest_flight_data.get(field, 0.0))) > maximum_jump:
                 return None, f"{field} jumped too far in a single packet and was treated as transmission noise"
 
+    baseline = evaluate_physical_baselines(candidate, latest_flight_data)
+    hard_boundary = baseline["status"] == "critical"
+
     recent = telemetry_window[-4:] + [candidate]
     filtered = dict(candidate)
     for field in ("vibr_x", "m_temp", "press", "cluster_distance", "ai_confidence"):
         filtered[field] = sum(item[field] for item in recent) / len(recent)
 
     anomaly_streak = anomaly_streak + 1 if candidate["raw_anomaly"] else 0
-    filtered["anomaly"] = anomaly_streak >= ANOMALY_CONFIRMATION_PACKETS
-    filtered["telemetry_quality"] = "filtered" if len(recent) > 1 else "verified"
+    filtered["anomaly"] = hard_boundary or anomaly_streak >= ANOMALY_CONFIRMATION_PACKETS
+    filtered["baseline"] = baseline
+    filtered["baseline_status"] = baseline["status"]
+    filtered["telemetry_quality"] = "critical" if hard_boundary else "filtered" if len(recent) > 1 else "verified"
     filtered["integrity"] = "verified"
     filtered["received_at"] = utc_iso()
 
@@ -512,6 +527,8 @@ def update():
         "anomaly": filtered_data["anomaly"],
         "alarm": filtered_data["anomaly"],
         "telemetry_quality": filtered_data["telemetry_quality"],
+        "baseline_status": filtered_data["baseline_status"],
+        "baseline": filtered_data["baseline"],
         "ai_confidence": filtered_data["ai_confidence"],
         "composite_trend_value": filtered_data["composite_trend_value"],
         "supabase_saved": supabase_saved,

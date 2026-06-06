@@ -145,6 +145,15 @@ def build_payload(node_id, vibration, temperature, pressure):
     return payload
 
 
+def learn_from_nominal_payload(payload):
+    point = [[payload["vibr_x"], payload["m_temp"], payload["press"]]]
+    if not kmeans_model.partial_fit_nominal(point):
+        return False
+
+    kmeans_model.save(MODEL_PATH)
+    return True
+
+
 def post_to_dashboard(payload):
     headers = {"X-Device-Token": DEVICE_TOKEN}
     response = requests.post(FLASK_UPDATE_URL, json=payload, headers=headers, timeout=2)
@@ -202,6 +211,9 @@ def main():
             response = post_to_dashboard(payload)
             
             current_anomaly_state = dashboard_alarm_state(response, alarm_active)
+            learned_online = False
+            if response.status_code == 200 and not current_anomaly_state:
+                learned_online = learn_from_nominal_payload(payload)
 
             if current_anomaly_state and not alarm_active:
                 print(f"[!!!] CONFIRMED ANOMALY ALERT FOR NODE {payload['node_id']}! Writing to serial...")
@@ -227,6 +239,7 @@ def main():
                 f"{payload['node_id']} | {status} | "
                 f"vib={payload['vibr_x']:.3f}, temp={payload['m_temp']:.1f}, "
                 f"press={payload['press']:.2f}, dist={payload['cluster_distance']:.2f}"
+                f"{' | model updated' if learned_online else ''}"
                 f"{api_status}"
             )
 

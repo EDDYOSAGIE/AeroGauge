@@ -160,6 +160,8 @@ create table if not exists public.flight_telemetry (
   vibr_x double precision not null,
   m_temp double precision not null,
   press double precision not null,
+  altitude_ft double precision not null default 0,
+  temp_location text not null default 'internal',
   cluster integer not null default 0,
   cluster_distance double precision not null default 0,
   ai_confidence double precision not null default 0,
@@ -167,9 +169,17 @@ create table if not exists public.flight_telemetry (
   anomaly boolean not null default false,
   telemetry_quality text not null default 'verified',
   integrity text not null default 'verified',
+  baseline_status text not null default 'nominal',
+  baseline jsonb not null default '{}'::jsonb,
   received_at timestamptz not null default now(),
   stored_at timestamptz not null default now()
 );
+
+alter table public.flight_telemetry
+  add column if not exists altitude_ft double precision not null default 0,
+  add column if not exists temp_location text not null default 'internal',
+  add column if not exists baseline_status text not null default 'nominal',
+  add column if not exists baseline jsonb not null default '{}'::jsonb;
 
 create index if not exists flight_telemetry_received_at_idx
   on public.flight_telemetry (received_at desc);

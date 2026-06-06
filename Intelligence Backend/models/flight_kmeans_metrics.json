@@ -1,0 +1,23 @@
+{
+  "feature_names": [
+    "vibration",
+    "temperature",
+    "pressure"
+  ],
+  "threshold": 3.0,
+  "n_clusters": 1,
+  "train": {
+    "samples": 9,
+    "mean_distance": 1.460409269504202,
+    "max_distance": 3.3359057175379525,
+    "anomaly_rate": 0.1111111111111111
+  },
+  "test": {
+    "samples": 3,
+    "mean_distance": 2.307248383469145,
+    "max_distance": 3.198655363777555,
+    "anomaly_rate": 0.3333333333333333
+  },
+  "train_inertia": 27.236412387372063,
+  "test_silhouette_score": null
+}
