@@ -30,6 +30,7 @@ const defaultData = {
   vibr_x: 0,
   m_temp: 0,
   press: 0,
+  altitude_ft: 0,
   cluster: 0,
   cluster_distance: 0,
   ai_confidence: 0,
@@ -589,10 +590,11 @@ function formatSessionHoursRemaining(expiresAt) {
 
 function TelemetryCards({ data }) {
   return (
-    <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+    <section className="grid gap-4 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
       <StatCard icon={Activity} label="Vibration" value={data.vibr_x.toFixed(3)} unit="G" color="bg-sky-50 text-sky-700" change="Airframe vibration index" />
       <StatCard icon={Thermometer} label="Motor Temp" value={data.m_temp.toFixed(1)} unit="deg C" color="bg-amber-50 text-amber-700" change={data.m_temp > 40 ? 'Thermal caution' : 'Thermal stable'} />
       <StatCard icon={CloudSun} label="Pressure" value={data.press.toFixed(0)} unit="hPa" color="bg-cyan-50 text-cyan-700" change="Environmental pressure" />
+      <StatCard icon={Gauge} label="Altitude" value={Number(data.altitude_ft ?? 0).toFixed(0)} unit="ft" color="bg-purple-50 text-purple-700" change="Flight altitude reference" />
       <StatCard icon={CircleDot} label="Node" value={data.node_id} unit="" color="bg-emerald-50 text-emerald-700" change="Active mesh node" />
     </section>
   );
