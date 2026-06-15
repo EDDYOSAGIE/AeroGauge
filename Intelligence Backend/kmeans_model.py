@@ -76,10 +76,12 @@ class FlightKMeansModel:
         points = self._as_array(values)
         cluster = int(self.pipeline.predict(points)[0])
         distance = float(self.distances(points)[0])
+        anomaly = distance > self.threshold
         return {
             "cluster": cluster,
             "cluster_distance": distance,
-            "anomaly": distance > self.threshold,
+            "anomaly": anomaly,
+            "anomaly_label": "threshold-anomaly" if anomaly else "nominal",
         }
 
     def supports_online_learning(self):

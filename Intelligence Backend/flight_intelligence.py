@@ -138,6 +138,7 @@ def build_payload(node_id, vibration, temperature, pressure):
         "cluster_distance": prediction["cluster_distance"],
         "ai_confidence": round(confidence, 2),
         "anomaly": bool(prediction["anomaly"]), # Ensure strict boolean formatting for JSON serialization
+        "anomaly_label": prediction["anomaly_label"],
     }
     canonical = canonical_telemetry_string(payload)
     payload["checksum"] = compute_crc32(canonical)

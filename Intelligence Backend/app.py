@@ -1,6 +1,7 @@
 import secrets
 import sqlite3
 import math
+import json
 import os
 from datetime import datetime, timedelta, timezone
 from functools import wraps
@@ -12,6 +13,7 @@ from flask_cors import CORS
 from werkzeug.security import check_password_hash, generate_password_hash
 
 from aviation_baselines import baseline_summary, evaluate_physical_baselines
+from kmeans_model import DEFAULT_METRICS_PATH
 from security_layer import (
     record_failed_login,
     security_summary,
@@ -99,8 +101,6 @@ def init_db():
                 severity TEXT NOT NULL,
                 source TEXT NOT NULL,
                 details TEXT NOT NULL,
-                buzzer_triggered INTEGER NOT NULL DEFAULT 0,
-                led_triggered INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL
             )
             """
@@ -181,6 +181,9 @@ latest_flight_data = {
     "ai_confidence": 0.0,
     "composite_trend_value": 0.0,
     "anomaly": False,
+    "hard_boundary": False,
+    "classification": "nominal",
+    "classification_source": "nominal",
     "telemetry_quality": "waiting",
     "baseline": baseline_summary(),
 }
@@ -252,8 +255,19 @@ def validate_and_filter_telemetry(payload):
 
     anomaly_streak = anomaly_streak + 1 if candidate["raw_anomaly"] else 0
     filtered["anomaly"] = hard_boundary or anomaly_streak >= ANOMALY_CONFIRMATION_PACKETS
+    filtered["hard_boundary"] = hard_boundary
     filtered["baseline"] = baseline
     filtered["baseline_status"] = baseline["status"]
+    filtered["classification"] = (
+        "baseline-critical"
+        if hard_boundary
+        else "threshold-anomaly"
+        if filtered["anomaly"]
+        else "nominal"
+    )
+    filtered["classification_source"] = (
+        "baseline" if hard_boundary else "model" if filtered["anomaly"] else "nominal"
+    )
     filtered["telemetry_quality"] = "critical" if hard_boundary else "filtered" if len(recent) > 1 else "verified"
     filtered["integrity"] = "verified"
     filtered["received_at"] = utc_iso()
@@ -526,6 +540,9 @@ def update():
         "message": quality_message,
         "anomaly": filtered_data["anomaly"],
         "alarm": filtered_data["anomaly"],
+        "hard_boundary": filtered_data["hard_boundary"],
+        "classification": filtered_data["classification"],
+        "classification_source": filtered_data["classification_source"],
         "telemetry_quality": filtered_data["telemetry_quality"],
         "baseline_status": filtered_data["baseline_status"],
         "baseline": filtered_data["baseline"],
@@ -563,6 +580,29 @@ def get_security_incidents():
 @app.route('/health', methods=['GET'])
 def health():
     return jsonify({"status": "ok", "service": "aerogauge-api"})
+
+
+@app.route('/metrics', methods=['GET'])
+def get_metrics():
+    """Return the current flight KMeans model metrics and training statistics."""
+    try:
+        if not Path(DEFAULT_METRICS_PATH).exists():
+            return jsonify({
+                "status": "not_found",
+                "message": "Model metrics have not been trained yet",
+            }), 404
+
+        metrics_text = Path(DEFAULT_METRICS_PATH).read_text(encoding="utf-8")
+        metrics = json.loads(metrics_text)
+        return jsonify({
+            "status": "success",
+            "metrics": metrics,
+        })
+    except (FileNotFoundError, json.JSONDecodeError) as exc:
+        return jsonify({
+            "status": "error",
+            "message": f"Could not load model metrics: {exc}",
+        }), 500
 
 
 init_db()

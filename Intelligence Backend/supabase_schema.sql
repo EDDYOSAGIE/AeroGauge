@@ -134,8 +134,6 @@ create table if not exists public.security_incidents (
   severity text not null,
   source text not null,
   details text not null,
-  buzzer_triggered boolean not null default false,
-  led_triggered boolean not null default false,
   created_at timestamptz not null default now()
 );
 
@@ -170,6 +168,9 @@ create table if not exists public.flight_telemetry (
   telemetry_quality text not null default 'verified',
   integrity text not null default 'verified',
   baseline_status text not null default 'nominal',
+  classification text not null default 'nominal',
+  classification_source text not null default 'nominal',
+  hard_boundary boolean not null default false,
   baseline jsonb not null default '{}'::jsonb,
   received_at timestamptz not null default now(),
   stored_at timestamptz not null default now()
@@ -179,6 +180,9 @@ alter table public.flight_telemetry
   add column if not exists altitude_ft double precision not null default 0,
   add column if not exists temp_location text not null default 'internal',
   add column if not exists baseline_status text not null default 'nominal',
+  add column if not exists classification text not null default 'nominal',
+  add column if not exists classification_source text not null default 'nominal',
+  add column if not exists hard_boundary boolean not null default false,
   add column if not exists baseline jsonb not null default '{}'::jsonb;
 
 create index if not exists flight_telemetry_received_at_idx

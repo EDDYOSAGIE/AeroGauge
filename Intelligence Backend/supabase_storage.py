@@ -89,8 +89,6 @@ def insert_security_incident(incident):
         "severity": incident["severity"],
         "source": incident["source"],
         "details": incident["details"],
-        "buzzer_triggered": bool(incident.get("buzzer_triggered")),
-        "led_triggered": bool(incident.get("led_triggered")),
         "created_at": incident["created_at"],
     }
     return _post("security_incidents", row)
@@ -116,6 +114,9 @@ def insert_telemetry(payload):
         "integrity": payload.get("integrity"),
         "baseline_status": payload.get("baseline_status"),
         "baseline": payload.get("baseline"),
+        "classification": payload.get("classification"),
+        "classification_source": payload.get("classification_source"),
+        "hard_boundary": payload.get("hard_boundary"),
         "received_at": payload.get("received_at"),
     }
     response = requests.post(

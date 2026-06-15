@@ -39,7 +39,7 @@ void triggerSecurityAlarm() {
 bool verifyFirmwareBeforeStartup() {
   String measuredHash = simulatedFirmwareHash();
   if (measuredHash != EXPECTED_FIRMWARE_HASH) {
-    triggerSecurityAlarm();
+    // Warning outputs are reserved for anomaly alarms only.
     Serial.println("SECURE_BOOT_REJECTED");
     return false;
   }

@@ -11,13 +11,11 @@ The IDS monitors:
 - Repeated failed access within a configurable time window.
 - Network and packet anomalies such as malformed, unsigned, or checksum-failed telemetry.
 
-When a high or critical incident is detected, the backend marks the security output as active:
+When a high or critical incident is detected, the backend marks the IDS status as active for monitoring and logging only:
 
-- `buzzer: true`
-- `warning_led: true`
 - `ids_status: "ALERT"`
 
-This allows the dashboard or hardware layer to trigger a buzzer, flash a warning LED, and log the incident.
+The buzzer and warning LED are reserved for anomaly alarms, not IDS incident signaling.
 
 ## Data Integrity Verification
 

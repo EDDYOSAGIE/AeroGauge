@@ -41,21 +41,18 @@ def _remember(counter, key, window_seconds):
 
 def create_incident(db, event_type, severity, source, details):
     created_at = iso_now()
-    buzzer_triggered = severity in {"high", "critical"}
-    led_triggered = severity in {"medium", "high", "critical"}
+    # Security incidents are logged only; buzzer and warning LED are not used for IDS alerts.
     db.execute(
         """
         INSERT INTO security_incidents
-            (event_type, severity, source, details, buzzer_triggered, led_triggered, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+            (event_type, severity, source, details, created_at)
+        VALUES (?, ?, ?, ?, ?)
         """,
         (
             event_type,
             severity,
             source,
             details,
-            int(buzzer_triggered),
-            int(led_triggered),
             created_at,
         ),
     )
@@ -65,8 +62,6 @@ def create_incident(db, event_type, severity, source, details):
             "severity": severity,
             "source": source,
             "details": details,
-            "buzzer_triggered": buzzer_triggered,
-            "led_triggered": led_triggered,
             "created_at": created_at,
         })
     except Exception as exc:
@@ -179,7 +174,7 @@ def validate_integrity(db, payload, source):
 def security_summary(db, limit=8):
     incidents = db.execute(
         """
-        SELECT event_type, severity, source, details, buzzer_triggered, led_triggered, created_at
+        SELECT event_type, severity, source, details, created_at
         FROM security_incidents
         ORDER BY id DESC
         LIMIT ?
@@ -191,7 +186,7 @@ def security_summary(db, limit=8):
     active = any(row["severity"] in {"high", "critical"} for row in latest[:3])
     return {
         "ids_status": "ALERT" if active else "CLEAR",
-        "buzzer": active,
-        "warning_led": active or any(row["severity"] == "medium" for row in latest[:3]),
+        "buzzer": False,
+        "warning_led": False,
         "recent_incidents": latest,
     }
