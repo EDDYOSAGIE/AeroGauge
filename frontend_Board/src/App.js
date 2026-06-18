@@ -367,12 +367,29 @@ function StatCard({ label, value, unit, icon: Icon, color, change }) {
   );
 }
 
+// ─── FIX: TelemetryChart now uses SVG so bar heights always render correctly ───
+// The original used `height: ${point}%` on flex children inside a div with
+// h-64. Percentage heights on flex children are not reliably resolved by
+// browsers because the flex container's height is layout-determined, not a
+// definite containing-block height. SVG avoids this entirely — bar heights
+// are expressed in SVG user units, which always resolve.
 function TelemetryChart({ data }) {
+  const SVG_W = 520;
+  const SVG_H = 200;
+  const PADDING = { top: 10, right: 8, bottom: 24, left: 8 };
+  const chartH = SVG_H - PADDING.top - PADDING.bottom;
+  const chartW = SVG_W - PADDING.left - PADDING.right;
+  const count = historySeed.length;
+
   const points = historySeed.map((base, index) => {
     const confidencePressure = Math.max(0, 100 - (data.ai_confidence ?? 0)) * 0.03;
     const live = data.composite_trend_value ?? (data.vibr_x * 2 + Math.max(0, data.m_temp - 25) * 0.1 + data.cluster_distance * 0.5 + confidencePressure);
     return Math.max(12, Math.min(92, base * 0.65 + live * 0.35 + (index % 3) * 3));
   });
+
+  const barW = (chartW / count) * 0.6;
+  const gap = chartW / count;
+  const isAlert = data.anomaly;
 
   return (
     <section className="rounded-lg border border-slate-700 bg-slate-900 p-5 shadow-sm xl:col-span-2">
@@ -383,14 +400,56 @@ function TelemetryChart({ data }) {
         </div>
         <span className="rounded-md bg-slate-800 px-3 py-2 text-xs font-semibold text-slate-100">LIVE</span>
       </div>
-      <div className="mt-6 flex h-64 items-end gap-3 border-b border-l border-slate-700 px-2 pb-2">
-        {points.map((point, index) => (
-          <div className="flex flex-1 flex-col items-center gap-2" key={index}>
-            <div className="w-full rounded-t-md bg-slate-600 transition-all" style={{ height: `${point}%` }}></div>
-            <span className="text-[10px] font-medium text-slate-500">{index + 1}</span>
-          </div>
-        ))}
-      </div>
+
+      <svg
+        className="mt-6 w-full"
+        viewBox={`0 0 ${SVG_W} ${SVG_H}`}
+        preserveAspectRatio="none"
+        role="img"
+        aria-label="Telemetry trend bar chart"
+      >
+        {/* axis lines */}
+        <line
+          x1={PADDING.left} y1={PADDING.top}
+          x2={PADDING.left} y2={PADDING.top + chartH}
+          stroke="#334155" strokeWidth="1"
+        />
+        <line
+          x1={PADDING.left} y1={PADDING.top + chartH}
+          x2={PADDING.left + chartW} y2={PADDING.top + chartH}
+          stroke="#334155" strokeWidth="1"
+        />
+
+        {points.map((pct, index) => {
+          const barH = (pct / 100) * chartH;
+          const x = PADDING.left + index * gap + (gap - barW) / 2;
+          const y = PADDING.top + chartH - barH;
+          const fill = isAlert
+            ? index === count - 1 ? '#ef4444' : '#f87171'
+            : index === count - 1 ? '#38bdf8' : '#475569';
+
+          return (
+            <g key={index}>
+              <rect
+                x={x} y={y}
+                width={barW} height={barH}
+                rx="3" ry="3"
+                fill={fill}
+                opacity={index === count - 1 ? 1 : 0.7}
+              />
+              <text
+                x={x + barW / 2}
+                y={PADDING.top + chartH + 14}
+                textAnchor="middle"
+                fontSize="9"
+                fill="#64748b"
+              >
+                {index + 1}
+              </text>
+            </g>
+          );
+        })}
+      </svg>
     </section>
   );
 }
@@ -499,213 +558,137 @@ function getAlertRows(data) {
 }
 
 function hasLiveTelemetry(data) {
-  return data.telemetry_quality !== 'waiting' && data.node_id !== 'None' && data.node_id !== 'N/A';
-}
-
-function isRecentIncident(incident) {
-  if (!incident?.created_at) {
-    return false;
-  }
-
-  const createdAt = new Date(incident.created_at).getTime();
-  return Number.isFinite(createdAt) && Date.now() - createdAt <= ACTIVE_ALERT_WINDOW_MS;
-}
-
-function getActiveAlertRows(data) {
-  if (!hasLiveTelemetry(data)) {
-    return [];
-  }
-
-  return getAlertRows(data).filter(([, , rowStatus]) => ALERT_STATUSES.has(rowStatus));
+  return data.node_id !== 'N/A' && data.telemetry_quality !== 'waiting';
 }
 
 function getAlertCount(data) {
-  const signalAlerts = getActiveAlertRows(data).length;
-  const incidentAlerts = data.security?.recent_incidents?.filter((incident) => (
-    isRecentIncident(incident) && (
-      incident.severity === 'medium' || incident.severity === 'high' || incident.severity === 'critical'
-    )
-  )).length || 0;
-  return signalAlerts + incidentAlerts;
-}
-
-function getWrittenAlerts(data) {
-  const telemetryMessages = getActiveAlertRows(data).map(([signal, value, rowStatus]) => {
-    const descriptions = {
-      'Mesh packet': `The latest mesh telemetry packet from ${value} needs operator review because the pattern was marked abnormal.`,
-      Vibration: `Vibration is high at ${value} G. Inspect the airframe reading before continuing normal monitoring.`,
-      'Motor temp': `Motor temperature is in caution range at ${value}. Check cooling and operating load.`,
-      Pressure: `Pressure reading is being tracked at ${value}.`,
-      'Mesh deviation score': `Mesh deviation score is ${value}, outside the learned healthy operating profile.`,
-      Integrity: `Telemetry integrity is ${value}. Review packet verification before trusting this feed.`,
-    };
-
-    return {
-      key: `telemetry-${signal}`,
-      title: `${signal}: ${rowStatus}`,
-      message: descriptions[signal] || `${signal} reported ${rowStatus.toLowerCase()} with value ${value}.`,
-      tone: rowStatus === 'Caution' ? 'amber' : 'red',
-    };
-  });
-
-  const securityMessages = (data.security?.recent_incidents || [])
-    .filter((incident) => (
-      isRecentIncident(incident)
-      && ['medium', 'high', 'critical'].includes(incident.severity)
-    ))
-    .map((incident, index) => ({
-      key: `security-${incident.created_at}-${index}`,
-      title: `${incident.event_type}: ${incident.severity}`,
-      message: `${incident.details || 'A security incident was recorded.'} Source: ${incident.source || 'unknown'}.`,
-      tone: incident.severity === 'medium' ? 'amber' : 'red',
-    }));
-
-  return [...telemetryMessages, ...securityMessages];
-}
-
-function buildAnalysis(data) {
-  const vibrationState = data.vibr_x > 0.5 ? 'higher than expected' : 'within the expected range';
-  const thermalState = data.m_temp > 40 ? 'showing thermal caution' : 'thermally stable';
-  const pressureState = data.press > 0 ? `pressure is tracking at ${data.press.toFixed(0)} hPa` : 'pressure has not reported a live value yet';
-
-  if (data.anomaly) {
-    return `Mesh analysis is marking this telemetry pattern as outside the healthy operating envelope. Vibration is ${vibrationState}, motor temperature is ${thermalState}, and ${pressureState}. The operator should review the telemetry packet and airframe condition before continuing normal flight observation.`;
-  }
-
-  return `Mesh analysis is accepting the latest telemetry as normal. The deviation score is ${data.cluster_distance.toFixed(2)}, vibration is ${vibrationState}, motor temperature is ${thermalState}, and ${pressureState}. Continue monitoring the feed because any sharp movement in distance or temperature will change this assessment in real time.`;
+  if (!data.anomaly) return 0;
+  const baseline = data.baseline || {};
+  const baselineAlerts = (baseline.alerts || []).length;
+  return Math.max(1, baselineAlerts);
 }
 
 function formatSessionHoursRemaining(expiresAt) {
-  if (!expiresAt) {
-    return '12.0';
-  }
+  if (!expiresAt) return '?';
+  const diff = new Date(expiresAt) - Date.now();
+  return Math.max(0, Math.round(diff / 3600000));
+}
 
-  const remainingMs = new Date(expiresAt).getTime() - Date.now();
-  if (!Number.isFinite(remainingMs)) {
-    return '12.0';
+function buildAnalysis(data) {
+  if (!hasLiveTelemetry(data)) {
+    return 'No live telemetry received yet. Connect the ESP32 gateway and start the flight intelligence processor.';
   }
-
-  return Math.max(0, remainingMs / (1000 * 60 * 60)).toFixed(1);
+  if (data.anomaly) {
+    const source = data.classification_source === 'baseline' ? 'physical DO-160 boundary violation' : 'KMeans model anomaly';
+    return `ANOMALY DETECTED via ${source}. Vibration ${data.vibr_x.toFixed(3)} G, temperature ${data.m_temp.toFixed(1)} °C, pressure ${data.press.toFixed(0)} hPa. Cluster distance ${data.cluster_distance.toFixed(2)} exceeds learned nominal envelope. Operator review required.`;
+  }
+  return `All sensor channels nominal. Vibration ${data.vibr_x.toFixed(3)} G within DO-160 bounds. Temperature ${data.m_temp.toFixed(1)} °C and pressure ${data.press.toFixed(0)} hPa within ISA reference. Model confidence ${data.ai_confidence.toFixed(0)}%.`;
 }
 
 function TelemetryCards({ data }) {
   return (
-    <section className="grid gap-4 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
-      <StatCard icon={Activity} label="Vibration" value={data.vibr_x.toFixed(3)} unit="G" color="bg-sky-50 text-sky-700" change="Airframe vibration index" />
-      <StatCard icon={Thermometer} label="Motor Temp" value={data.m_temp.toFixed(1)} unit="deg C" color="bg-amber-50 text-amber-700" change={data.m_temp > 40 ? 'Thermal caution' : 'Thermal stable'} />
-      <StatCard icon={CloudSun} label="Pressure" value={data.press.toFixed(0)} unit="hPa" color="bg-cyan-50 text-cyan-700" change="Environmental pressure" />
-      <StatCard icon={Gauge} label="Altitude" value={Number(data.altitude_ft ?? 0).toFixed(0)} unit="ft" color="bg-purple-50 text-purple-700" change="Flight altitude reference" />
-      <StatCard icon={CircleDot} label="Node" value={data.node_id} unit="" color="bg-emerald-50 text-emerald-700" change="Active mesh node" />
-    </section>
+    <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-5">
+      <StatCard label="Vibration" value={data.vibr_x.toFixed(3)} unit="G" icon={Activity} color="bg-sky-50 text-sky-700" change="Airframe vibration index" />
+      <StatCard label="Motor Temp" value={data.m_temp.toFixed(1)} unit="deg C" icon={Thermometer} color="bg-orange-50 text-orange-700" change="Thermal stable" />
+      <StatCard label="Pressure" value={data.press.toFixed(0)} unit="hPa" icon={CloudSun} color="bg-teal-50 text-teal-700" change="Environmental pressure" />
+      <StatCard label="Altitude" value={data.altitude_ft.toFixed(0)} unit="ft" icon={CircleDot} color="bg-violet-50 text-violet-700" change="Flight altitude reference" />
+      <StatCard label="Node" value={data.node_id} unit="" icon={Radio} color="bg-emerald-50 text-emerald-700" change="Active mesh node" />
+    </div>
   );
 }
 
 function FlightDataView({ data }) {
-  const telemetryRows = [
+  const rows = [
     ['Node ID', data.node_id],
     ['Vibration X', `${data.vibr_x.toFixed(3)} G`],
-    ['Motor temperature', `${data.m_temp.toFixed(1)} deg C`],
-    ['Pressure', `${data.press.toFixed(0)} hPa`],
-    ['Altitude reference', `${Number(data.altitude_ft ?? 0).toFixed(0)} ft`],
-    ['Mesh profile group', data.cluster ?? 0],
-    ['Mesh deviation score', data.cluster_distance.toFixed(2)],
-    ['Model confidence', `${Number(data.ai_confidence ?? 0).toFixed(0)}%`],
-    ['Composite trend', (data.composite_trend_value ?? 0).toFixed(2)],
-    ['Telemetry integrity', data.integrity || 'pending'],
+    ['Motor Temperature', `${data.m_temp.toFixed(1)} °C`],
+    ['Pressure', `${data.press.toFixed(2)} hPa`],
+    ['Altitude', `${data.altitude_ft.toFixed(0)} ft`],
+    ['Cluster', data.cluster],
+    ['Cluster Distance', data.cluster_distance.toFixed(3)],
+    ['AI Confidence', `${data.ai_confidence.toFixed(1)}%`],
+    ['Composite Trend', data.composite_trend_value?.toFixed(2) ?? '—'],
+    ['Anomaly', data.anomaly ? 'YES' : 'No'],
+    ['Hard Boundary', data.hard_boundary ? 'YES' : 'No'],
+    ['Classification', data.classification],
+    ['Classification Source', data.classification_source],
+    ['Telemetry Quality', data.telemetry_quality],
+    ['Integrity', data.integrity],
+    ['Baseline Status', data.baseline_status],
+    ['ISA Pressure', `${data.baseline?.pressure_isa_mb ?? '—'} mb`],
+    ['ISA Temperature', `${data.baseline?.temperature_isa_c ?? '—'} °C`],
+    ['Received At', data.received_at ? new Date(data.received_at).toLocaleTimeString() : '—'],
   ];
 
   return (
-    <>
-      <TelemetryCards data={data} />
-      <section className="mt-4 grid gap-4 xl:grid-cols-[1.1fr_0.9fr]">
-        <TelemetryChart data={data} />
-        <div className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
-          <h2 className="font-semibold text-slate-950">Live Sensor Telemetry</h2>
-          <p className="mt-1 text-sm text-slate-500">Real-time values received from the secure mesh gateway and backend inference.</p>
-          <div className="mt-4 overflow-hidden rounded-md border border-slate-100">
-            <table className="w-full text-left text-sm">
-              <tbody className="divide-y divide-slate-100">
-                {telemetryRows.map(([label, value]) => (
-                  <tr key={label}>
-                    <td className="px-4 py-3 font-medium text-slate-500">{label}</td>
-                    <td className="px-4 py-3 font-mono text-slate-800">{value}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </section>
-    </>
-  );
-}
-
-function AnalysisView({ data }) {
-  const analysis = buildAnalysis(data);
-
-  return (
-    <section className="grid gap-4 xl:grid-cols-[0.85fr_1.15fr]">
-      <MiniWave data={data} />
-      <div className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
-        <div className="flex items-center justify-between gap-3">
-          <div>
-            <h2 className="font-semibold text-slate-950">Live Mesh Analysis</h2>
-            <p className="mt-1 text-sm text-slate-500">Operational explanation generated from the current telemetry state.</p>
-          </div>
-          <span className={`rounded-md px-3 py-2 text-xs font-semibold ${data.anomaly ? 'bg-red-50 text-red-700' : 'bg-emerald-50 text-emerald-700'}`}>
-            {data.anomaly ? 'OUTLIER' : 'IN RANGE'}
-          </span>
-        </div>
-        <p className="mt-5 leading-7 text-slate-700">{analysis}</p>
-        <div className="mt-5 grid gap-3 md:grid-cols-3">
-          {[
-            ['Vibration input', `${data.vibr_x.toFixed(3)} G`, data.vibr_x > 0.5 ? 'Elevated' : 'Stable'],
-            ['Thermal input', `${data.m_temp.toFixed(1)} deg C`, data.m_temp > 40 ? 'Caution' : 'Stable'],
-            ['Mesh deviation', data.cluster_distance.toFixed(2), data.anomaly ? 'Outside envelope' : 'Healthy envelope'],
-          ].map(([label, value, status]) => (
-            <div className="rounded-md border border-slate-100 bg-slate-50 p-4" key={label}>
-              <p className="text-xs font-semibold uppercase text-slate-400">{label}</p>
-              <p className="mt-2 font-mono text-xl font-semibold text-slate-950">{value}</p>
-              <p className="mt-1 text-sm text-slate-500">{status}</p>
-            </div>
-          ))}
-        </div>
+    <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
+      <h2 className="font-semibold text-slate-950">Raw Telemetry Stream</h2>
+      <p className="mt-1 text-sm text-slate-500">Live sensor packet from the active mesh node.</p>
+      <div className="mt-4 overflow-hidden rounded-md border border-slate-100">
+        <table className="w-full text-left text-sm">
+          <thead className="bg-slate-50 text-xs uppercase text-slate-400">
+            <tr>
+              <th className="px-4 py-3 font-semibold">Field</th>
+              <th className="px-4 py-3 font-semibold">Value</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-slate-100">
+            {rows.map(([field, value]) => (
+              <tr key={field}>
+                <td className="px-4 py-3 font-medium text-slate-700">{field}</td>
+                <td className="px-4 py-3 font-mono text-slate-600">{String(value)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </div>
     </section>
   );
 }
 
-function AlertsView({ data }) {
-  const alertRows = getAlertRows(data);
-  const writtenAlerts = getWrittenAlerts(data);
+function AnalysisView({ data }) {
+  const baseline = data.baseline || {};
+  const alerts = baseline.alerts || [];
+
+  const rows = [
+    ['ISA Standard', baseline.standard ?? '—', 'Reference'],
+    ['Altitude Reference', `${baseline.altitude_ft ?? 0} ft`, 'Reference'],
+    ['ISA Pressure', `${baseline.pressure_isa_mb ?? '—'} mb`, 'Reference'],
+    ['ISA Temperature', `${baseline.temperature_isa_c ?? '—'} °C`, 'Reference'],
+    ['Vibration Normal', baseline.vibration_normal_g ? `${baseline.vibration_normal_g[0]}–${baseline.vibration_normal_g[1]} G` : '—', 'Normal'],
+    ['Vibration Critical', `${baseline.vibration_critical_g ?? '—'} G`, 'Limit'],
+    ['Pressure Minimum', `${baseline.pressure_minimum_mb ?? '—'} mb`, 'Limit'],
+    ['Temperature Critical', `${baseline.temperature_critical_c ?? '—'} °C`, 'Limit'],
+    ['Baseline Status', baseline.status ?? 'nominal', baseline.status === 'critical' ? 'Critical' : 'Nominal'],
+    ['KMeans Cluster', data.cluster, 'Model'],
+    ['Cluster Distance', data.cluster_distance.toFixed(3), data.anomaly ? 'Outlier' : 'Accepted'],
+    ['AI Confidence', `${data.ai_confidence.toFixed(1)}%`, data.ai_confidence < 50 ? 'Review' : 'High'],
+    ['Composite Trend', data.composite_trend_value?.toFixed(2) ?? '—', 'Composite'],
+  ];
 
   return (
-    <section className="grid gap-4 xl:grid-cols-[0.9fr_1.1fr]">
-      <SecurityPanel security={data.security} />
-      <div className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
-        <div className="flex items-center justify-between">
-          <div>
-            <h2 className="font-semibold text-slate-950">Alert Registry</h2>
-            <p className="mt-1 text-sm text-slate-500">Telemetry and security alerts are collected here for operator review.</p>
+    <div className="space-y-5">
+      {alerts.length > 0 && (
+        <section className="rounded-lg border border-red-200 bg-red-50 p-4">
+          <h2 className="font-semibold text-red-800">Active Baseline Alerts</h2>
+          <div className="mt-3 space-y-2">
+            {alerts.map((alert, index) => (
+              <div key={index} className="rounded-md border border-red-200 bg-white p-3">
+                <div className="flex items-center justify-between">
+                  <span className="font-semibold text-red-700">{alert.sensor}</span>
+                  <span className="rounded-md bg-red-100 px-2 py-0.5 text-xs font-semibold uppercase text-red-700">{alert.severity}</span>
+                </div>
+                <p className="mt-1 text-sm text-red-600">{alert.message}</p>
+                <p className="mt-1 font-mono text-xs text-slate-500">Observed: {alert.observed} | Limit: {alert.limit}</p>
+              </div>
+            ))}
           </div>
-          <span className="rounded-md bg-slate-100 px-3 py-2 font-mono text-xs text-slate-500">REAL TIME</span>
-        </div>
-        <div className="mt-4 space-y-3">
-          {writtenAlerts.length === 0 ? (
-            <div className="rounded-md border border-emerald-100 bg-emerald-50 p-4">
-              <p className="text-sm font-semibold text-emerald-800">No active alerts</p>
-              <p className="mt-1 text-sm text-emerald-700">No live telemetry or recent security activity currently needs operator review.</p>
-            </div>
-          ) : writtenAlerts.map((alert) => (
-            <div
-              className={`rounded-md border p-4 ${alert.tone === 'amber' ? 'border-amber-200 bg-amber-50 text-amber-800' : 'border-red-200 bg-red-50 text-red-800'}`}
-              key={alert.key}
-            >
-              <p className="text-sm font-semibold">{alert.title}</p>
-              <p className="mt-1 text-sm leading-6">{alert.message}</p>
-            </div>
-          ))}
-        </div>
+        </section>
+      )}
+
+      <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
+        <h2 className="font-semibold text-slate-950">Mesh Analysis</h2>
+        <p className="mt-1 text-sm text-slate-500">ISA baseline, DO-160 limits, and KMeans model output.</p>
         <div className="mt-4 overflow-hidden rounded-md border border-slate-100">
           <table className="w-full text-left text-sm">
             <thead className="bg-slate-50 text-xs uppercase text-slate-400">
@@ -716,7 +699,7 @@ function AlertsView({ data }) {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {alertRows.map(([signal, value, rowStatus]) => (
+              {rows.map(([signal, value, rowStatus]) => (
                 <tr key={signal}>
                   <td className="px-4 py-3 font-medium text-slate-700">{signal}</td>
                   <td className="px-4 py-3 font-mono text-slate-600">{value}</td>
@@ -730,6 +713,48 @@ function AlertsView({ data }) {
             </tbody>
           </table>
         </div>
+      </section>
+    </div>
+  );
+}
+
+function AlertsView({ data }) {
+  const rows = getAlertRows(data);
+
+  return (
+    <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="font-semibold text-slate-950">Alert Queue</h2>
+          <p className="mt-1 text-sm text-slate-500">Sensor and model-derived alerts for operator review.</p>
+        </div>
+        <span className={`rounded-md px-3 py-2 text-xs font-semibold ${data.anomaly ? 'bg-red-50 text-red-700' : 'bg-emerald-50 text-emerald-700'}`}>
+          {data.anomaly ? 'ANOMALY' : 'CLEAR'}
+        </span>
+      </div>
+      <div className="mt-5 overflow-hidden rounded-md border border-slate-100">
+        <table className="w-full text-left text-sm">
+          <thead className="bg-slate-50 text-xs uppercase text-slate-400">
+            <tr>
+              <th className="px-4 py-3 font-semibold">Signal</th>
+              <th className="px-4 py-3 font-semibold">Value</th>
+              <th className="px-4 py-3 font-semibold">Status</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-slate-100">
+            {rows.map(([signal, value, rowStatus]) => (
+              <tr key={signal}>
+                <td className="px-4 py-3 font-medium text-slate-700">{signal}</td>
+                <td className="px-4 py-3 font-mono text-slate-600">{value}</td>
+                <td className="px-4 py-3">
+                  <span className={`rounded-md px-2 py-1 text-xs font-semibold ${ALERT_STATUSES.has(rowStatus) ? 'bg-red-50 text-red-700' : 'bg-emerald-50 text-emerald-700'}`}>
+                    {rowStatus}
+                  </span>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </div>
     </section>
   );
