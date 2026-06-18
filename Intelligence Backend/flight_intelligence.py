@@ -21,6 +21,10 @@ MODEL_PATH = Path(os.getenv("KMEANS_MODEL_PATH", DEFAULT_MODEL_PATH))
 DEVICE_TOKEN = os.getenv("DEVICE_TOKEN", "development-device-token")
 
 FEATURE_NAMES = ("vibration", "temperature", "pressure")
+
+# Gateway broadcasts altitude in metres; the rest of the system uses feet.
+METRES_TO_FEET = 3.28084
+
 ESP32_BOOT_PREFIXES = (
     "ELF file SHA256",
     "Rebooting",
@@ -98,16 +102,50 @@ def is_esp32_boot_line(line):
 
 
 def parse_esp_line(line):
-    """Convert ESP32 gateway serial telemetry into a node id and feature floats."""
+    """Convert ESP32 gateway serial telemetry into a node id and feature floats.
+
+    Supported formats (in priority order):
+
+    5-field — current gateway:
+        nodeId,vib,temp,presHpa,alt_m
+        e.g. 1763114016,1.052,29.9,1005.00,12.50
+        Altitude arrives in metres and is converted to feet here.
+
+    4-field with string node id (legacy, no altitude):
+        node_id,vib,temp,presHpa
+        Returns altitude_ft = 0.0
+
+    3-field anonymous (legacy, no altitude):
+        vib,temp,presHpa
+        Returns NODE_ID and altitude_ft = 0.0
+
+    4-field with CRC (legacy):
+        vib,temp,presHpa,crc32hex
+        Returns NODE_ID and altitude_ft = 0.0
+
+    Returns: (node_id, vibration, temperature, pressure, altitude_ft)
+    """
     parts = [value.strip() for value in line.split(",")]
 
-    if len(parts) == 4 and _is_float(parts[1]) and _is_float(parts[2]) and _is_float(parts[3]):
+    # ── 5-field: nodeId,vib,temp,presHpa,alt_m  (current gateway format) ──
+    if (len(parts) == 5
+            and _is_float(parts[1]) and _is_float(parts[2])
+            and _is_float(parts[3]) and _is_float(parts[4])):
         node_id = parts[0]
-        return node_id, float(parts[1]), float(parts[2]), float(parts[3])
+        alt_ft = float(parts[4]) * METRES_TO_FEET
+        return node_id, float(parts[1]), float(parts[2]), float(parts[3]), alt_ft
 
+    # ── 4-field: node_id,vib,temp,presHpa  (legacy, no altitude) ──
+    if (len(parts) == 4
+            and _is_float(parts[1]) and _is_float(parts[2]) and _is_float(parts[3])):
+        node_id = parts[0]
+        return node_id, float(parts[1]), float(parts[2]), float(parts[3]), 0.0
+
+    # ── 3-field: vib,temp,presHpa  (anonymous, no altitude) ──
     if len(parts) == 3 and all(_is_float(value) for value in parts):
-        return NODE_ID, float(parts[0]), float(parts[1]), float(parts[2])
+        return NODE_ID, float(parts[0]), float(parts[1]), float(parts[2]), 0.0
 
+    # ── 4-field with CRC: vib,temp,presHpa,crc32hex  (legacy) ──
     if len(parts) == 4 and all(_is_float(value) for value in parts[:3]):
         sensor_payload = ",".join(parts[:3])
         expected_crc = compute_crc32(sensor_payload)
@@ -116,9 +154,12 @@ def parse_esp_line(line):
             raise ValueError(
                 f"serial CRC mismatch: expected {expected_crc}, received {received_crc}"
             )
-        return NODE_ID, float(parts[0]), float(parts[1]), float(parts[2])
+        return NODE_ID, float(parts[0]), float(parts[1]), float(parts[2]), 0.0
 
-    raise ValueError("Expected node_id,vibration,temp,pressure or vibration,temp,pressure[,crc32]")
+    raise ValueError(
+        "Expected node_id,vib,temp,pres,alt_m  or  node_id,vib,temp,pres  "
+        "or  vib,temp,pres[,crc32]"
+    )
 
 
 def anomaly_distance(vibration, temperature, pressure):
@@ -126,18 +167,30 @@ def anomaly_distance(vibration, temperature, pressure):
     return float(kmeans_model.distances(point)[0])
 
 
-def build_payload(node_id, vibration, temperature, pressure):
+def build_payload(node_id, vibration, temperature, pressure, altitude_ft=0.0):
+    """Build the secure telemetry payload forwarded to the Flask dashboard.
+
+    altitude_ft is forwarded as-is so Flask / aviation_baselines can compute
+    the ISA reference pressure and temperature at the correct flight level.
+    The confidence score is based on how far the reading sits from the KMeans
+    cluster relative to twice the anomaly threshold, clamped to [0, 100].
+    """
     prediction = kmeans_model.predict([[vibration, temperature, pressure]])
-    confidence = max(0.0, min(100.0, 100.0 * (1.0 - (prediction["cluster_distance"] / (kmeans_model.threshold * 2.0)))))
+    # Confidence: 100 % when distance = 0, falls to 0 % at 2× threshold.
+    confidence = max(
+        0.0,
+        min(100.0, 100.0 * (1.0 - (prediction["cluster_distance"] / (kmeans_model.threshold * 2.0)))),
+    )
     payload = {
         "node_id": node_id,
         "vibr_x": vibration,
         "m_temp": temperature,
         "press": pressure,
+        "altitude_ft": round(altitude_ft, 1),
         "cluster": prediction["cluster"],
         "cluster_distance": prediction["cluster_distance"],
         "ai_confidence": round(confidence, 2),
-        "anomaly": bool(prediction["anomaly"]), # Ensure strict boolean formatting for JSON serialization
+        "anomaly": bool(prediction["anomaly"]),  # Ensure strict boolean formatting for JSON serialization
         "anomaly_label": prediction["anomaly_label"],
     }
     canonical = canonical_telemetry_string(payload)
@@ -194,7 +247,7 @@ def main():
     print(f"Posting telemetry to: {FLASK_UPDATE_URL}")
     if FLASK_UPDATE_URL.startswith("http://127.0.0.1") or FLASK_UPDATE_URL.startswith("http://localhost"):
         print("[!] Using local Flask URL. Set FLASK_UPDATE_URL to your Render /update URL when the backend is deployed.")
-    print("Expected serial format: node_id,vibration,temp,pressure")
+    print("Expected serial format: node_id,vibration,temp,pressure,altitude_m")
 
     # Keep track of local state to avoid spamming the serial port continuously
     alarm_active = False
@@ -235,11 +288,12 @@ def main():
             api_status = ""
             if response.status_code != 200:
                 api_status = f" | API returned HTTP {response.status_code}: {response.text[:120]}"
-            
+
             print(
                 f"{payload['node_id']} | {status} | "
                 f"vib={payload['vibr_x']:.3f}, temp={payload['m_temp']:.1f}, "
-                f"press={payload['press']:.2f}, dist={payload['cluster_distance']:.2f}"
+                f"press={payload['press']:.2f}, alt={payload['altitude_ft']:.0f}ft, "
+                f"dist={payload['cluster_distance']:.2f}, conf={payload['ai_confidence']:.1f}%"
                 f"{' | model updated' if learned_online else ''}"
                 f"{api_status}"
             )

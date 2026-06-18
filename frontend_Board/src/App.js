@@ -586,12 +586,22 @@ function buildAnalysis(data) {
 }
 
 function TelemetryCards({ data }) {
+  // Altitude arrives in feet (converted from metres in flight_intelligence.py)
+  // Confidence is 0–100 % from the KMeans model; show it prominently here so
+  // operators can see it at a glance instead of only in the Mesh Health panel.
+  const confidenceColor = data.ai_confidence >= 70
+    ? 'bg-emerald-50 text-emerald-700'
+    : data.ai_confidence >= 40
+      ? 'bg-amber-50 text-amber-700'
+      : 'bg-red-50 text-red-700';
+
   return (
-    <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-5">
+    <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-6">
       <StatCard label="Vibration" value={data.vibr_x.toFixed(3)} unit="G" icon={Activity} color="bg-sky-50 text-sky-700" change="Airframe vibration index" />
       <StatCard label="Motor Temp" value={data.m_temp.toFixed(1)} unit="deg C" icon={Thermometer} color="bg-orange-50 text-orange-700" change="Thermal stable" />
       <StatCard label="Pressure" value={data.press.toFixed(0)} unit="hPa" icon={CloudSun} color="bg-teal-50 text-teal-700" change="Environmental pressure" />
       <StatCard label="Altitude" value={data.altitude_ft.toFixed(0)} unit="ft" icon={CircleDot} color="bg-violet-50 text-violet-700" change="Flight altitude reference" />
+      <StatCard label="AI Confidence" value={Number(data.ai_confidence ?? 0).toFixed(0)} unit="%" icon={Gauge} color={confidenceColor} change="KMeans model confidence" />
       <StatCard label="Node" value={data.node_id} unit="" icon={Radio} color="bg-emerald-50 text-emerald-700" change="Active mesh node" />
     </div>
   );
@@ -603,7 +613,7 @@ function FlightDataView({ data }) {
     ['Vibration X', `${data.vibr_x.toFixed(3)} G`],
     ['Motor Temperature', `${data.m_temp.toFixed(1)} °C`],
     ['Pressure', `${data.press.toFixed(2)} hPa`],
-    ['Altitude', `${data.altitude_ft.toFixed(0)} ft`],
+    ['Altitude', `${data.altitude_ft.toFixed(0)} ft  (${(data.altitude_ft / 3.28084).toFixed(1)} m)`],
     ['Cluster', data.cluster],
     ['Cluster Distance', data.cluster_distance.toFixed(3)],
     ['AI Confidence', `${data.ai_confidence.toFixed(1)}%`],
