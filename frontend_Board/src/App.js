@@ -553,6 +553,7 @@ function getAlertRows(data) {
     ['Motor temp', `${data.m_temp.toFixed(1)} deg C`, data.m_temp > 40 ? 'Caution' : 'Normal'],
     ['Pressure', `${data.press.toFixed(0)} hPa`, 'Tracked'],
     ['Mesh deviation score', data.cluster_distance.toFixed(2), data.anomaly ? 'Outlier' : 'Accepted'],
+    ['AI Confidence', `${Number(data.ai_confidence ?? 0).toFixed(0)}%`, data.ai_confidence < 50 ? 'Review' : 'High'],
     ['Integrity', data.integrity || 'pending', data.integrity === 'verified' ? 'Verified' : hasTelemetry ? 'Review' : 'Pending'],
   ];
 }
@@ -587,21 +588,14 @@ function buildAnalysis(data) {
 
 function TelemetryCards({ data }) {
   // Altitude arrives in feet (converted from metres in flight_intelligence.py)
-  // Confidence is 0–100 % from the KMeans model; show it prominently here so
-  // operators can see it at a glance instead of only in the Mesh Health panel.
-  const confidenceColor = data.ai_confidence >= 70
-    ? 'bg-emerald-50 text-emerald-700'
-    : data.ai_confidence >= 40
-      ? 'bg-amber-50 text-amber-700'
-      : 'bg-red-50 text-red-700';
-
+  // AI Confidence now lives only in the Alerts tab (see getAlertRows) — keeping
+  // the main dashboard focused on raw sensor readings.
   return (
-    <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-6">
+    <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-5">
       <StatCard label="Vibration" value={data.vibr_x.toFixed(3)} unit="G" icon={Activity} color="bg-sky-50 text-sky-700" change="Airframe vibration index" />
       <StatCard label="Motor Temp" value={data.m_temp.toFixed(1)} unit="deg C" icon={Thermometer} color="bg-orange-50 text-orange-700" change="Thermal stable" />
       <StatCard label="Pressure" value={data.press.toFixed(0)} unit="hPa" icon={CloudSun} color="bg-teal-50 text-teal-700" change="Environmental pressure" />
       <StatCard label="Altitude" value={data.altitude_ft.toFixed(0)} unit="ft" icon={CircleDot} color="bg-violet-50 text-violet-700" change="Flight altitude reference" />
-      <StatCard label="AI Confidence" value={Number(data.ai_confidence ?? 0).toFixed(0)} unit="%" icon={Gauge} color={confidenceColor} change="KMeans model confidence" />
       <StatCard label="Node" value={data.node_id} unit="" icon={Radio} color="bg-emerald-50 text-emerald-700" change="Active mesh node" />
     </div>
   );
@@ -616,24 +610,19 @@ function FlightDataView({ data }) {
     ['Altitude', `${data.altitude_ft.toFixed(0)} ft  (${(data.altitude_ft / 3.28084).toFixed(1)} m)`],
     ['Cluster', data.cluster],
     ['Cluster Distance', data.cluster_distance.toFixed(3)],
-    ['AI Confidence', `${data.ai_confidence.toFixed(1)}%`],
-    ['Composite Trend', data.composite_trend_value?.toFixed(2) ?? '—'],
     ['Anomaly', data.anomaly ? 'YES' : 'No'],
     ['Hard Boundary', data.hard_boundary ? 'YES' : 'No'],
     ['Classification', data.classification],
     ['Classification Source', data.classification_source],
     ['Telemetry Quality', data.telemetry_quality],
     ['Integrity', data.integrity],
-    ['Baseline Status', data.baseline_status],
-    ['ISA Pressure', `${data.baseline?.pressure_isa_mb ?? '—'} mb`],
-    ['ISA Temperature', `${data.baseline?.temperature_isa_c ?? '—'} °C`],
     ['Received At', data.received_at ? new Date(data.received_at).toLocaleTimeString() : '—'],
   ];
 
   return (
     <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
       <h2 className="font-semibold text-slate-950">Raw Telemetry Stream</h2>
-      <p className="mt-1 text-sm text-slate-500">Live sensor packet from the active mesh node.</p>
+      <p className="mt-1 text-sm text-slate-500">Live sensor packet from the active mesh node. ISA baseline and DO-160 limits are on the Mesh Analysis tab.</p>
       <div className="mt-4 overflow-hidden rounded-md border border-slate-100">
         <table className="w-full text-left text-sm">
           <thead className="bg-slate-50 text-xs uppercase text-slate-400">
@@ -730,6 +719,7 @@ function AnalysisView({ data }) {
 
 function AlertsView({ data }) {
   const rows = getAlertRows(data);
+  const explanation = buildAnalysis(data);
 
   return (
     <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
@@ -741,6 +731,10 @@ function AlertsView({ data }) {
         <span className={`rounded-md px-3 py-2 text-xs font-semibold ${data.anomaly ? 'bg-red-50 text-red-700' : 'bg-emerald-50 text-emerald-700'}`}>
           {data.anomaly ? 'ANOMALY' : 'CLEAR'}
         </span>
+      </div>
+      <div className={`mt-4 rounded-md border p-4 ${data.anomaly ? 'border-red-200 bg-red-50' : 'border-slate-100 bg-slate-50'}`}>
+        <p className={`text-xs font-semibold uppercase ${data.anomaly ? 'text-red-700' : 'text-slate-400'}`}>What's happening</p>
+        <p className={`mt-2 text-sm leading-6 ${data.anomaly ? 'text-red-700' : 'text-slate-600'}`}>{explanation}</p>
       </div>
       <div className="mt-5 overflow-hidden rounded-md border border-slate-100">
         <table className="w-full text-left text-sm">
